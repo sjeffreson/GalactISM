@@ -1,3 +1,4 @@
+from __future__ import division
 """
     Class written by https://gist.github.com/denis-bz
 """
@@ -5,7 +6,6 @@
 """ invdisttree.py: inverse-distance-weighted interpolation using KDTree
     fast, solid, local
 """
-from __future__ import division
 import numpy as np
 from scipy.spatial import cKDTree as KDTree
     # http://docs.scipy.org/doc/scipy/reference/spatial.html
