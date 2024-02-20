@@ -1,9 +1,10 @@
 """
     Script written by Carol Cuesta-Lazaro and Sarah Jeffreson
 """
-""" Class to train normalizing flows on galaxy simulation data, in order to
-    predict probability distributions of the star formation rate (surface
-    density or volume density)
+""" Script to train normalizing flows on galaxy simulation data, in order to
+    predict the star formation rate (surface density or volume density). The
+    script trains flows for each galaxy type, using only training data from the
+    other galaxy types, with different sets of training variables specified by the user.
 """
 
 import sys
@@ -67,6 +68,27 @@ def standarize_data(logX, logY):
 
     return logX, logY, norm_dict
 
+def training_sets(set_type):
+    # training features that are broadly reliable in cosmo sims
+    if(set_type=='a'):
+        input_features = sorted(['midplane-dens'])
+    elif(set_type=='b'):
+        input_features = sorted(['midplane-dens', 'weights'])
+    elif(set_type=='c'):
+        input_features = sorted(['midplane-dens', 'weights', 'Omegazs', 'kappa'])
+    elif(set_type=='d'):
+        input_features = sorted(['midplane-dens', 'weights', 'Omegazs', 'kappa', 'midplane-stellar-dens'])
+    # features that are debatably reliable in cosmo sims
+    elif(set_type=='e'):
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
+        'midplane-Pturb', 'midplane-Pth'])
+    elif(set_type=='f'):
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
+        'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D'])
+    else:
+        print('Please choose a valid training set: a, b, c, d, e, or f')
+    return input_features
+
 def get_flow(num_features, num_context_features, num_hidden_features, num_layers=6):
     # Define the conditional normalizing flow
     base_dist = StandardNormal(shape=[1])
@@ -95,28 +117,10 @@ if __name__ == '__main__':
 
     log_features = ['midplane-SFR-dens', 'midplane-stellar-dens', 'midplane-dens', 'weights', 'Omegazs', 'kappas',
         'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D']
-
-   # training features that are broadly reliable in cosmo sims
-    if(sys.argv[2]=='a'):
-        input_features = sorted(['midplane-dens'])
-    elif(sys.argv[2]=='b'):
-        input_features = sorted(['midplane-dens', 'weights'])
-    elif(sys.argv[2]=='c'):
-        input_features = sorted(['midplane-dens', 'weights', 'Omegazs', 'kappa'])
-    elif(sys.argv[2]=='d'):
-        input_features = sorted(['midplane-dens', 'weights', 'Omegazs', 'kappa', 'midplane-stellar-dens'])
-    # features that are debatably reliable in cosmo sims
-    elif(sys.argv[2]=='e'):
-        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
-        'midplane-Pturb', 'midplane-Pth'])
-    elif(sys.argv[2]=='f'):
-        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
-        'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D'])
-    else:
-        print('Please choose a valid training set: a, b, c, d, e, or f')
+    input_features = training_sets(sys.argv[2])
 
     output_path = output_path / target_galaxy
-    output_path = output_path / ("set_"+sys.argv[2])
+    output_path = output_path / ("set_"+set_type)
     output_path.mkdir(parents=True, exist_ok=True)
 
     num_hidden_features = 128
