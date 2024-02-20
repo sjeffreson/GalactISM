@@ -24,14 +24,14 @@ from nflows.transforms.autoregressive import MaskedAffineAutoregressiveTransform
 from nflows.transforms.permutations import ReversePermutation
 
 DEFAULT_ROOT_DIR = Path("/n/holystore01/LABS/itc_lab/Lab/to-Carol/")
-def get_data(input_features, log_features, output_features, galaxy_types):
+def get_data(input_features, log_features, output_features, galaxy_types, snap_frac=0.1):
     gals = GalDataset(
         input_features=input_features,
         output_features=output_features,
-        galaxy_types=galaxy_types
-
+        galaxy_types=galaxy_types,
+        snap_frac=snap_frac,
     )
-    print("Number of galaxy snapshots = "+str(len(gal)))
+    print("Number of galaxy snapshots = "+str(len(gals)))
     input_dict, outputs_dict = gals.get_data_as_1d()
 
     inputs = np.stack([
@@ -46,6 +46,11 @@ def get_data(input_features, log_features, output_features, galaxy_types):
     return inputs, outputs
 
 def standarize_data(logX, logY):
+    logX = logX[~np.isnan(logX).any(axis=1)]
+    logY = logY[~np.isnan(logY).any(axis=1)]
+    logX = logX[~np.isinf(logX).any(axis=1)]
+    logY = logY[~np.isinf(logY).any(axis=1)]
+
     norm_dict = {
         'x_min': np.min(logX, axis=0),
         'y_min': np.min(logY, axis=0),
@@ -88,20 +93,19 @@ if __name__ == '__main__':
     galaxy_types.remove(target_galaxy)
     galaxy_types = sorted(galaxy_types)
 
-    log_features = ['midplane-SFR-dens', 'midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
+    log_features = ['midplane-SFR-dens', 'midplane-stellar-dens', 'midplane-dens', 'weights', 'Omegazs', 'kappas',
         'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D']
 
-    '''training features that are broadly reliable in cosmo sims'''
+   # training features that are broadly reliable in cosmo sims
     if(sys.argv[2]=='a'):
         input_features = sorted(['midplane-dens'])
-    if(sys.argv[2]=='b'):
-        input_features = sorted(['midplane-dens', 'midplane-stellar-dens'])
+    elif(sys.argv[2]=='b'):
+        input_features = sorted(['midplane-dens', 'weights'])
     elif(sys.argv[2]=='c'):
-        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights'])
+        input_features = sorted(['midplane-dens', 'weights', 'Omegazs', 'kappa'])
     elif(sys.argv[2]=='d'):
-        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappas'])
-
-    '''features that are debatably reliable in cosmo sims'''
+        input_features = sorted(['midplane-dens', 'weights', 'Omegazs', 'kappa', 'midplane-stellar-dens'])
+    # features that are debatably reliable in cosmo sims
     elif(sys.argv[2]=='e'):
         input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
         'midplane-Pturb', 'midplane-Pth'])
@@ -127,7 +131,7 @@ if __name__ == '__main__':
         galaxy_types=galaxy_types,
         snap_frac=0.2,
     )
-    X, Y, norm_dict = standarize_data(X, Y, log_features_idx)
+    X, Y, norm_dict = standarize_data(X, Y)
 
     # store the flow
     norm_dict = {k: v.tolist() for k, v in norm_dict.items()}

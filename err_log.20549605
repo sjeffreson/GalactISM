@@ -1,0 +1,2 @@
+/n/home03/sjeffreson/subgrid_starform_flows/train_flow.py:38: RuntimeWarning: invalid value encountered in log10
+  np.log10(input_dict[feature]) if feature in log_features else input_dict[feature]
