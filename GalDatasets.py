@@ -1,6 +1,5 @@
 """
-    Class written by Carol Cuesta-Lazaro
-    and Sarah Jeffreson
+    Class written by Sarah Jeffreson and Carol Cuesta-Lazaro
 """
 """ Class to load dataset from galaxy simulations and perform various
     formatting operations
@@ -21,11 +20,13 @@ class GalDataset:
         input_features: List[str],
         output_features: List[str],
         galaxy_types: List[str],
+        snap_frac: float = 0.1,
         root_dir: Path = DEFAULT_ROOT_DIR
     ):
         self.input_features = input_features
         self.output_features = output_features
         self.galaxy_types = galaxy_types
+        self.snap_frac = snap_frac
         self.root_dir = root_dir
 
         self.all_filenames_by_feature = self.get_all_filenames_by_feature()
@@ -53,7 +54,8 @@ class GalDataset:
         self,
         galaxy_type: str
     ) -> np.array:
-        """Get the indices of the pixels in a galaxy that are not zero
+        """Get the indices of the pixels in a galaxy that are above
+        the threshold for star formation
         Args:
             galaxy_type (str): type of galaxy
         Returns:
@@ -62,7 +64,7 @@ class GalDataset:
         density = np.array(ah.flatten_list([
             list(np.ravel(np.load(item))) for item in self.get_filenames(
                 galaxy_type=galaxy_type,
-                feature="midplane_gas_dens")
+                feature="midplane-SFR-dens")
         ]))
         return np.where(density>0)[0]
 
@@ -129,7 +131,8 @@ class GalDataset:
             List[str]: list of filenames in data folder
         """
         filename = f"{galaxy_type}/{feature}*_???.npy"
-        return list(sorted(self.root_dir.rglob(filename)))
+        filename_list = list(sorted(self.root_dir.rglob(filename)))
+        return filename_list[::int(np.rint(1./self.snap_frac))]
 
     def get_all_filenames(
         self,
@@ -146,12 +149,13 @@ class GalDataset:
         self,
         galaxy_type: str,
     ) -> List[str]:
-        """filenames for the mid-plane density of gas in data folder
+        """filenames for the mid-plane SFR density in data folder
         Returns:
             List[str]: list of filenames in data folder
         """
-        filename = f"{galaxy_type}/midplane_gas_dens_*.npy"
-        return list(sorted(self.root_dir.rglob(filename)))
+        filename = f"{galaxy_type}/midplane-SFR-dens*.npy"
+        filename_list = list(sorted(self.root_dir.rglob(filename)))
+        return filename_list[::int(np.rint(1./self.snap_frac))]
 
     def get_all_filenames_density(
         self,
@@ -161,7 +165,7 @@ class GalDataset:
             filenames += self.get_filenames_density(galaxy_type)
         return filenames
 
-   def get_all_filenames_by_feature(
+    def get_all_filenames_by_feature(
         self,
     ):
         all_filenames_by_feature = {}
@@ -210,7 +214,8 @@ class GalDataset:
 
         input_features = {feature: [] for feature in self.input_features}
         output_features = {feature: [] for feature in self.output_features}
-
+        
+        px_idcs_gals = []
         for galaxy_type in self.galaxy_types:
             nonzero_density_idcs = self.get_idcs_usable_px(galaxy_type)
             px_idcs = np.random.choice(
@@ -221,20 +226,20 @@ class GalDataset:
 
             filenames_by_feature = self.get_filenames_by_feature(galaxy_type)
             for feature in self.input_features:
-                input_features[feature].append(ah.flatten_list([
+                input_features[feature].append(np.array(ah.flatten_list([
                     list(np.ravel(np.load(filenames_by_feature[feature][idx])))
-                    for idx in len(filenames_by_feature[feature])
-                ]))
+                    for idx in range(len(filenames_by_feature[feature]))
+                ]))[px_idcs])
 
             for feature in self.output_features:
-                output_features[feature].append(ah.flatten_list([
+                output_features[feature].append(np.array(ah.flatten_list([
                     list(np.ravel(np.load(filenames_by_feature[feature][idx])))
-                    for idx in len(filenames_by_feature[feature])
-                ]))
+                    for idx in range(len(filenames_by_feature[feature]))
+                ]))[px_idcs])
 
         for feature in self.input_features:
-            input_features[feature] = torch.tensor(ah.flatten_list(input_features[feature]))
+            input_features[feature] = torch.tensor(np.array(input_features[feature]).flatten())
         for feature in self.output_features:
-            output_features[feature] = torch.tensor(ah.flatten_list(output_features[feature]))
+            output_features[feature] = torch.tensor(np.array(output_features[feature]).flatten())
         
         return input_features, output_features

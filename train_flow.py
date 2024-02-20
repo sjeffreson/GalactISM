@@ -1,6 +1,5 @@
 """
-    Class written by Carol Cuesta-Lazaro
-    and Sarah Jeffreson
+    Script written by Carol Cuesta-Lazaro and Sarah Jeffreson
 """
 """ Class to train normalizing flows on galaxy simulation data, in order to
     predict probability distributions of the star formation rate (surface
@@ -32,7 +31,7 @@ def get_data(input_features, log_features, output_features, galaxy_types):
         galaxy_types=galaxy_types
 
     )
-    print("Number of galaxies = "+str(len(gal)))
+    print("Number of galaxy snapshots = "+str(len(gal)))
     input_dict, outputs_dict = gals.get_data_as_1d()
 
     inputs = np.stack([
@@ -89,28 +88,29 @@ if __name__ == '__main__':
     galaxy_types.remove(target_galaxy)
     galaxy_types = sorted(galaxy_types)
 
-    log_features = ['gas_surfdens', 'stellar_surfdens', 'weights', 'kappas']
+    log_features = ['midplane-SFR-dens', 'midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
+        'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D']
 
     '''training features that are broadly reliable in cosmo sims'''
-    if(sys.argv[2]=='0'):
-        input_features = sorted(['gas_surfdens'])
     if(sys.argv[2]=='a'):
-        input_features = sorted(['gas_surfdens', 'stellar_surfdens'])
-    elif(sys.argv[2]=='b'):
-        input_features = sorted(['gas_surfdens', 'stellar_surfdens', 'weights'])
+        input_features = sorted(['midplane-dens'])
+    if(sys.argv[2]=='b'):
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens'])
     elif(sys.argv[2]=='c'):
-        input_features = sorted(['gas_surfdens', 'stellar_surfdens', 'weights', 'kappas'])
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights'])
+    elif(sys.argv[2]=='d'):
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappas'])
 
     '''features that are debatably reliable in cosmo sims'''
-    elif(sys.argv[2]=='d'):
-        input_features = sorted(['gas_surfdens', 'stellar_surfdens', 'weights', 'kappa',
-        'midplane-dens', 'midplane-stellar-dens'])
     elif(sys.argv[2]=='e'):
-        input_features = sorted(['gas_surfdens', 'stellar_surfdens', 'weights', 'kappa',
-        'midplane-dens', 'midplane-stellar-dens', 'midplane-Pturb', 'midplane-Pth'])
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
+        'midplane-Pturb', 'midplane-Pth'])
+    elif(sys.argv[2]=='f'):
+        input_features = sorted(['midplane-dens', 'midplane-stellar-dens', 'weights', 'kappa',
+        'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D'])
     else:
-        input_features = sorted(['gas_surfdens', 'stellar_surfdens', 'weights', 'kappa',
-        'midplane-dens', 'midplane-stellar-dens', 'midplane-Pturb', 'midplane-Pth', 'midplane-veldispz', 'midplane-veldisp3D'])
+        print('Please choose a valid training set: a, b, c, d, e, or f')
+
     output_path = output_path / target_galaxy
     output_path = output_path / ("set_"+sys.argv[2])
     output_path.mkdir(parents=True, exist_ok=True)
@@ -123,10 +123,10 @@ if __name__ == '__main__':
     X, Y = get_data(
         input_features=input_features,
         log_features=log_features,
-        output_features=['SFR_surfdens'],
+        output_features=['midplane-SFR-dens'],
         galaxy_types=galaxy_types,
+        snap_frac=0.2,
     )
-    print(type(X), type(Y), np.shape(X), np.shape(Y))
     X, Y, norm_dict = standarize_data(X, Y, log_features_idx)
 
     # store the flow
