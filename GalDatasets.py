@@ -106,14 +106,15 @@ class GalDataset:
         Returns:
             Tuple[Tensor, Tensor]: input and output images
         """
-        input_features = [
+        input_features = torch.tensor(np.stack([
             torch.tensor(np.load(self.all_filenames_by_feature[feature][idx]))
             for feature in self.input_features
-        ]
-        output_features = [
+        ], axis=-1))
+        output_features = torch.tensor(np.stack([
             torch.tensor(np.load(self.all_filenames_by_feature[feature][idx]))
             for feature in self.output_features
-        ]
+        ], axis=-1))
+
         return input_features, output_features
     
     def __len__(
