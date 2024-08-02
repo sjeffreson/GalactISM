@@ -5,60 +5,162 @@ import numpy as np
 from scipy.signal import savgol_filter as sg
 from scipy.stats import binned_statistic_2d
 from scipy.interpolate import interp1d
+from rbf.interpolate import RBFInterpolant
 
 import h5py
 import astro_helper as ah
-from invdisttree import Invdisttree
+
+import configparser
+import argparse, logging
+import time
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 DEFAULT_ROOT_DIR = Path("/n/holystore01/LABS/itc_lab/Users/sjeffreson/")
 class GriddedDataset:
     '''Grid Voronoi cells into a 3D array of desired resolution and calculate
     relevant training data for the normalizing flows, at this resolution.'''
-
     def __init__(
         self,
+        params: configparser.SectionProxy,
         galaxy_type: str,
-        max_grid_width: float = 30., # kpc, generally set to galaxy diameter
-        max_grid_height: float = 1.5, # kpc
-        resolution: float = 80., # pc
-        ptl_resolution: float = None, # pc, for computation of the potential
-        root_dir: Path = DEFAULT_ROOT_DIR,
+        total_height: float = 1., # kpc, careful choosing this, we want a z-bin centered on z=0, 25 bins of 80pc
+        xymax: float = 15., # kpc
+        xybin_width: float = 80., # pc
+        zbin_width: float = 80., # pc
+        zbin_width_ptl: float = 10., # pc, for computation of the potential for weights only (need finer rsln to capture dens. fluct.)
+        rotcurve_rsln: float = 20., # bin resolution for computation of the rotation curve
+        exclude_temp_above: float = None, # K
+        exclude_avir_below: float = None, # virial parameter
+        exclude_HII: bool = False, # whether to completely exclude ionized gas
         snapname: str = "snap-DESPOTIC_300.hdf5",
-        realign_galaxy: bool=True, # according to angular momentum vector of gas
+        midplane_idcs: np.array = None, # if mid-plane already known
+        realign_galaxy_to_gas: bool=True, # according to angular momentum vector of gas
+        realign_galaxy_to_disk: bool=False, # according to angular momentum vector of entire disk system
+        required_particle_types: List[int] = [0], # just gas by default
     ):
-        
+        self.ROOT_DIR = Path(params['ROOT_DIR'])
         self.galaxy_type = galaxy_type
-        self.max_grid_width = max_grid_width * ah.kpc_to_cm
-        self.max_grid_height = max_grid_height * ah.kpc_to_cm
-        self.resolution = resolution * ah.pc_to_cm
-        self.ptl_resolution = ptl_resolution
-        if self.ptl_resolution != None:
-            self.ptl_resolution = self.ptl_resolution * ah.pc_to_cm
-        self.root_dir = root_dir
+        self.galaxy_dir = params['SUBDIR']
+
+        self.total_height = total_height * ah.kpc_to_cm
+        self.xymax = xymax * ah.kpc_to_cm
+        self.xybin_width = xybin_width * ah.pc_to_cm
+        self.zbin_width = zbin_width * ah.pc_to_cm
+        self.zbin_width_ptl = zbin_width_ptl * ah.pc_to_cm
+        self.rotcurve_rsln = rotcurve_rsln * ah.pc_to_cm
+        self.exclude_temp_above = exclude_temp_above
+        self.exclude_avir_below = exclude_avir_below
+        self.exclude_HII = exclude_HII
         self.snapname = snapname
-        self.realign_galaxy = realign_galaxy
+        self.midplane_idcs = midplane_idcs
+        self.realign_galaxy_to_gas = realign_galaxy_to_gas
+        self.realign_galaxy_to_disk = realign_galaxy_to_disk
 
-        self.gas_data = self.read_snap_data(0)
-        if realign_galaxy:
-            self.x_CM, self.y_CM, self.z_CM, self.vx_CM, self.vy_CM, self.vz_CM = self.get_gas_disk_COM()
-            self.Lx, self.Ly, self.Lz = self.get_gas_disk_angmom()
-            self.gas_data = self.set_realign_galaxy(self.gas_data)
+        '''Load all required data'''
+        self.data = {}
+        for part_type in required_particle_types:
+            self.data[part_type] = self._read_snap_data(part_type)
 
-        # (degraded) grid on which to compute arrays
-        # TODO: Replace inverse distance interpolation with RBF interpolation package
-        # TODO: Replace gridding in general with RBF interpolation package, right now it's just nearest neighbor
-        self.xy_binnum = int(np.ceil(self.max_grid_width/self.resolution))
-        self.xbin_edges = np.linspace(-self.max_grid_width, self.max_grid_width, self.xy_binnum+1)
-        self.ybin_edges = np.linspace(-self.max_grid_width, self.max_grid_width, self.xy_binnum+1)
-        self.xbin_centers = (self.xbin_edges[1:]+self.xbin_edges[:-1])*0.5
-        self.ybin_centers = (self.ybin_edges[1:]+self.ybin_edges[:-1])*0.5
+        '''Sixth PartType for all stars'''
+        present_stellar_types = [key for key, value in self.data.items() if key in [2, 3, 4] and value is not None]
+        if len(present_stellar_types) > 0:
+            self.data[5] = {key: np.concatenate([self.data[i][key] for i in present_stellar_types]) for key in self.data[present_stellar_types[0]]}
 
-        self.x_grid, self.y_grid = np.meshgrid(self.xbin_centers, self.ybin_centers)
+        '''Seventh PartType for gas that's cut to parameter thresholds, create new variable
+        for this, as we don't want to cut out these gas cells for every method.'''
+        self.data[6] = None
+        cnd = np.ones(len(self.data[0]["R_coords"]), dtype=bool)
+        if exclude_temp_above is not None:
+            cnd = cnd & (self.data[0]["temps"] < exclude_temp_above)
+        if exclude_avir_below is not None:
+            cnd = cnd & ~((self.data[0]["AlphaVir"] < exclude_avir_below) & (self.data[0]["AlphaVir"] > 0.))
+        self.data[6] = {key: value[cnd] for key, value in self.data[0].items()}
+        if exclude_HII:
+            self.data[6]["masses"] = self.data[6]["masses"] * (1. - self.data[6]["xHP"])
+            self.data[6]["Density"] = self.data[6]["Density"] * (1. - self.data[6]["xHP"])
+
+        '''Realign the galaxy according to the gas or gas+stellar disk'''
+        if self.realign_galaxy_to_gas & self.realign_galaxy_to_disk:
+            raise ValueError("Galaxy cannot be realigned to both gas and disk. Please choose one.")
+        if self.realign_galaxy_to_gas:
+            if 0 not in self.data:
+                raise ValueError("Gas data must be loaded to realign the galaxy to the gas.")
+            self.x_CM, self.y_CM, self.z_CM, self.vx_CM, self.vy_CM, self.vz_CM = self._get_gas_disk_COM()
+            self.Lx, self.Ly, self.Lz = self._get_gas_disk_angmom()
+            self.data = {key: self._set_realign_galaxy(value) for key, value in self.data.items()}
+        elif self.realign_galaxy_to_disk:
+            if 0 not in self.data or 2 not in self.data:
+                raise ValueError("Gas and stellar disk particles must be loaded to realign the galaxy to the disk.")
+            self.x_CM, self.y_CM, self.z_CM, self.vx_CM, self.vy_CM, self.vz_CM = self._get_disk_COM()
+            self.Lx, self.Ly, self.Lz = self._get_disk_angmom()
+            self.data = {key: self._set_realign_galaxy(value) for key, value in self.data.items()}
+
+        '''Grid on which to compute arrays'''
+        self.xybinno = int(np.rint(2.*self.xymax/self.xybin_width))
+        self.xbin_edges = np.linspace(-self.xymax, self.xymax, self.xybinno+1)
+        self.xbin_centers = (self.xbin_edges[1:]+self.xbin_edges[:-1])/2.
+
+        self.ybin_edges = self.xbin_edges.copy()
+        self.ybin_centers = self.xbin_centers.copy()
+
+        self.zbinno = int(np.rint(2.*self.total_height/self.zbin_width))
+        self.zbin_centers = np.linspace(-self.total_height, self.total_height, self.zbinno+1)
+        self.zbin_edges = (self.zbin_centers[1:]+self.zbin_centers[:-1])/2.
+
+        self.xbin_centers_2d, self.ybin_centers_2d = np.meshgrid(self.xbin_centers, self.ybin_centers)
+        self.xbin_centers_2d = self.xbin_centers_2d.T
+        self.ybin_centers_2d = self.ybin_centers_2d.T
+
+        '''R-bins for the rotation curve'''
+        self.Rmax = self.xymax
+        self.Rbinno = int(np.rint(self.Rmax/self.rotcurve_rsln))
+        self.Rbin_edges = np.linspace(0., self.Rmax, self.Rbinno+1)
+
+        '''Finer z-grid for the potential'''
+        self.zbinno_ptl = int(np.rint(2.*self.total_height/self.zbin_width_ptl))
+        self.zbin_edges_ptl = np.linspace(-self.total_height, self.total_height, self.zbinno_ptl+1)
+        self.zbin_centers_ptl = (self.zbin_edges_ptl[1:]+self.zbin_edges_ptl[:-1])/2.
+
+        self.xbin_centers_3d_ptl, self.ybin_centers_3d_ptl, self.zbin_centers_3d_ptl = np.meshgrid(self.xbin_centers, self.ybin_centers, self.zbin_centers_ptl)
+        self.xbin_centers_3d_ptl = np.transpose(self.xbin_centers_3d_ptl, axes=(1, 0, 2))
+        self.ybin_centers_3d_ptl = np.transpose(self.ybin_centers_3d_ptl, axes=(1, 0, 2))
+        self.zbin_centers_3d_ptl = np.transpose(self.zbin_centers_3d_ptl, axes=(1, 0, 2))
     
-    def get_grid(self) -> Tuple[np.array, np.array, np.array]:
-        return self.x_grid, self.y_grid
+        '''Keywords to access methods'''
+        self._method_map = {
+            'SFR_voldens_midplane': lambda: self.get_SFR_voldens_xyz(),
+            'H2_frac': lambda: self.get_H2_mass_frac_xyz(),
+            'HI_frac': lambda: self.get_HI_mass_frac_xyz(),
+            'gas_voldens': lambda: self.get_density_xyz(PartType=0),
+            'star_voldens': lambda: self.get_density_xyz(PartType=5),
+            'gas_voldens_midplane': self.get_midplane_density_xy(PartType=0),
+            'star_voldens_midplane': self.get_midplane_density_xy(PartType=5),
+            'gas_surfdens': lambda: self.get_surfdens_xy(PartType=0),
+            'star_surfdens': lambda: self.get_surfdens_xy(PartType=5),
+            'rotcurve': lambda: self.get_rotation_curve_xy(),
+            'kappa': lambda: self.get_kappa_xy(),
+            'veldisp_3D': lambda: self.get_gas_midplane_veldisps_xyz_xyz(),
+            'Pturb': lambda: self.get_gas_midplane_turbpress_xy(),
+            'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(),
+            'Phi': lambda:self.get_potential_xyz(),
+            'weight': lambda: self.get_weight_xy() / ah.kB_cgs,
+            'PtlMinIdcs': lambda: self._get_cached_force()[2],
+        }
 
-    def read_snap_data(
+    def get_prop_by_keyword(self, keyword: str) -> np.array:
+        '''Get the physical property array by keyword'''
+
+        if keyword not in self._method_map:
+            raise ValueError("Keyword {:s} not found in method map.".format(keyword))
+        return self._method_map[keyword]()
+
+    def get_grid(self) -> Tuple[np.array, np.array, np.array]:
+        return self.xbin_centers, self.ybin_centers, self.zbin_centers
+
+    ###----------- Data manipulation functions -----------###
+
+    def _read_snap_data(
         self,
         PartType: int,
     ) -> Dict[str, np.array]:
@@ -69,7 +171,7 @@ class GriddedDataset:
         Returns:
             Dict: dictionary with only the relevant gas information, in cgs units
         """
-        snapshot = h5py.File(DEFAULT_ROOT_DIR / self.galaxy_type / self.snapname, "r")
+        snapshot = h5py.File(self.ROOT_DIR / self.galaxy_dir / self.snapname, "r")
         header = snapshot["Header"]
         if "PartType"+str(PartType) not in snapshot:
             return None
@@ -80,6 +182,7 @@ class GriddedDataset:
         snap_data["x_coords"] = (PartType_data['Coordinates'][:,0] - 0.5 * header.attrs['BoxSize']) * PartType_data['Coordinates'].attrs['to_cgs']
         snap_data["y_coords"] = (PartType_data['Coordinates'][:,1] - 0.5 * header.attrs['BoxSize']) * PartType_data['Coordinates'].attrs['to_cgs']
         snap_data["R_coords"] = np.sqrt(snap_data["x_coords"]**2 + snap_data["y_coords"]**2)
+        snap_data["phi_coords"] = np.arctan2(snap_data["y_coords"], snap_data["x_coords"])
         snap_data["z_coords"] = (PartType_data['Coordinates'][:,2] - 0.5 * header.attrs['BoxSize']) * PartType_data['Coordinates'].attrs['to_cgs']
         snap_data["velxs"] = PartType_data['Velocities'][:,0] * PartType_data['Velocities'].attrs['to_cgs']
         snap_data["velys"] = PartType_data['Velocities'][:,1] * PartType_data['Velocities'].attrs['to_cgs']
@@ -90,24 +193,52 @@ class GriddedDataset:
         else:
             snap_data["masses"] = np.ones(len(snap_data["x_coords"])) * header.attrs['MassTable'][PartType] * snapshot['PartType0/Masses'].attrs['to_cgs']
         if PartType != 0:
+            snapshot.close()
             return snap_data
         else:
-            snap_data["Density"] = PartType_data['Density'][:] * PartType_data['Density'].attrs['to_cgs']
+            # standard Arepo
             snap_data["U"] = PartType_data['InternalEnergy'][:] * PartType_data['InternalEnergy'].attrs['to_cgs']
-            snap_data["voldenses"] = PartType_data['Density'][:] * PartType_data['Density'].attrs['to_cgs']
             snap_data["temps"] = (ah.gamma - 1.) * snap_data["U"] / ah.kB_cgs * ah.mu * ah.mp_cgs
+            snap_data["Density"] = PartType_data['Density'][:] * PartType_data['Density'].attrs['to_cgs']
             snap_data["SFRs"] = PartType_data['StarFormationRate'][:] * PartType_data['StarFormationRate'].attrs['to_cgs']
-            snap_data["AlphaVir"] = PartType_data['AlphaVir'][:]
+            # specific to Jeffreson et al. runs
+            try:
+                snap_data["xH2"] = PartType_data['ChemicalAbundances'][:,0] * 2.
+                snap_data["xHP"] = PartType_data['ChemicalAbundances'][:,1]
+                snap_data["xHI"] = 1. - snap_data["xH2"] - snap_data["xHP"]
+                snap_data["AlphaVir"] = PartType_data['AlphaVir'][:]
+            except KeyError:
+                snap_data["xH2"] = np.zeros(len(snap_data["x_coords"]))
+                snap_data["xHP"] = np.zeros(len(snap_data["x_coords"]))
+                snap_data["xHI"] = np.ones(len(snap_data["x_coords"]))
+                snap_data["AlphaVir"] = np.zeros(len(snap_data["x_coords"]))
+            snapshot.close()
             return snap_data
     
-    def cut_out_gas_disk(self) -> Dict[str, np.array]:
-        '''cut out most of the gas cells that are in the background grid, not the disk'''
-        cnd = (self.gas_data["R_coords"] < self.max_grid_width/2.) & (np.fabs(self.gas_data["z_coords"]) < self.max_grid_width/2.)
-        return {key: value[cnd] for key, value in self.gas_data.items()}
+    def _cut_out_particles(self, PartType: int=0) -> Dict[str, np.array]:
+        '''Cut out most of the gas cells that are in the background grid, not the disk'''
 
-    def get_gas_disk_COM(self) -> Tuple[float, float, float, float, float, float]:
+        cnd = (self.data[PartType]["R_coords"] < self.Rmax) & (np.fabs(self.data[PartType]["z_coords"]) < self.Rmax)
+        return {key: value[cnd] for key, value in self.data[PartType].items()}
+
+    def _get_disk_COM(self) -> Tuple[float, float, float, float, float, float]:
+        '''Get the center of mass (positional and velocity) of the gas/stellar disk.'''
+
+        gasstar_data = {key: np.concatenate([self.data[2][key], self._cut_out_particles(PartType=0)[key]]) for key in self.data[2]}
+
+        x_CM = np.average(gasstar_data["x_coords"], weights=gasstar_data["masses"])
+        y_CM = np.average(gasstar_data["y_coords"], weights=gasstar_data["masses"])
+        z_CM = np.average(gasstar_data["z_coords"], weights=gasstar_data["masses"])
+        vx_CM = np.average(gasstar_data["velxs"], weights=gasstar_data["masses"])
+        vy_CM = np.average(gasstar_data["velys"], weights=gasstar_data["masses"])
+        vz_CM = np.average(gasstar_data["velzs"], weights=gasstar_data["masses"])
+
+        return x_CM, y_CM, z_CM, vx_CM, vy_CM, vz_CM
+
+    def _get_gas_disk_COM(self) -> Tuple[float, float, float, float, float, float]:
         '''Get the center of mass (positional and velocity) of the gas disk'''
-        gas_data_cut = self.cut_out_gas_disk()
+
+        gas_data_cut = self._cut_out_particles(PartType=0)
 
         x_CM = np.average(gas_data_cut["x_coords"], weights=gas_data_cut["masses"])
         y_CM = np.average(gas_data_cut["y_coords"], weights=gas_data_cut["masses"])
@@ -118,10 +249,31 @@ class GriddedDataset:
 
         return x_CM, y_CM, z_CM, vx_CM, vy_CM, vz_CM
 
-    def get_gas_disk_angmom(self) -> Tuple[float, float, float]:
+    def _get_disk_angmom(self) -> Tuple[float, float, float]:
+        '''Get the angular momentum vector of the disk'''
+
+        x_CM, y_CM, z_CM, vx_CM, vy_CM, vz_CM = self._get_disk_COM()
+        gasstar_data = {key: np.concatenate([self.data[2][key], self._cut_out_particles(PartType=0)[key]]) for key in self.data[2]}
+
+        Lx = np.sum(
+            gasstar_data["masses"]*((gasstar_data["y_coords"]-y_CM)*(gasstar_data["velzs"]-vz_CM) -
+            (gasstar_data["z_coords"]-z_CM)*(gasstar_data["velys"]-vy_CM))
+        )
+        Ly = np.sum(
+            gasstar_data["masses"]*((gasstar_data["z_coords"]-z_CM)*(gasstar_data["velxs"]-vx_CM) -
+            (gasstar_data["x_coords"]-x_CM)*(gasstar_data["velzs"]-vz_CM))
+        )
+        Lz = np.sum(
+            gasstar_data["masses"]*((gasstar_data["x_coords"]-x_CM)*(gasstar_data["velys"]-vy_CM) -
+            (gasstar_data["y_coords"]-y_CM)*(gasstar_data["velxs"]-vx_CM))
+        )
+        return Lx, Ly, Lz
+
+    def _get_gas_disk_angmom(self) -> Tuple[float, float, float]:
         '''Get the angular momentum vector of the gas disk'''
-        x_CM, y_CM, z_CM, vx_CM, vy_CM, vz_CM = self.get_gas_disk_COM()
-        gas_data_cut = self.cut_out_gas_disk()
+
+        x_CM, y_CM, z_CM, vx_CM, vy_CM, vz_CM = self._get_gas_disk_COM()
+        gas_data_cut = self._cut_out_particles(PartType=0)
 
         Lx = np.sum(
             gas_data_cut["masses"]*((gas_data_cut["y_coords"]-y_CM)*(gas_data_cut["velzs"]-vz_CM) -
@@ -137,9 +289,12 @@ class GriddedDataset:
         )
         return Lx, Ly, Lz
 
-    def set_realign_galaxy(self, snap_data: Dict[str, np.array]) -> Dict[str, np.array]:
+    def _set_realign_galaxy(self, snap_data: Dict[str, np.array]) -> Dict[str, np.array]:
         '''Realign the galaxy according to the center of mass and the angular momentum
         vector of the gas disk'''
+
+        if snap_data is None:
+            return None
 
         # new unit vectors
         zu = np.array([self.Lx, self.Ly, self.Lz])/np.sqrt(self.Lx**2+self.Ly**2+self.Lz**2)
@@ -161,250 +316,497 @@ class GriddedDataset:
         snap_data['velys'] = yu[0]*vx + yu[1]*vy + yu[2]*vz
         snap_data['velzs'] = zu[0]*vx + zu[1]*vy + zu[2]*vz
 
+        snap_data['R_coords'] = np.sqrt(snap_data['x_coords']**2 + snap_data['y_coords']**2)
+        snap_data['phi_coords'] = np.arctan2(snap_data['y_coords'], snap_data['x_coords'])
+
         return snap_data
 
-    def get_rotation_curve(self, deltaR: float=10.) -> Tuple[np.array, np.array]:
-        '''Get the rotation curve of the galaxy, in cm/s. DeltaR is the size of the radial bins
-        (pc) used to compute the rotation curve at all azimuthal angles, which is then interpolated
-        to obtain the grid.'''
-        Rbin_edges = np.linspace(0., self.max_grid_width, int(np.rint(self.max_grid_width/(deltaR*ah.pc_to_cm))))
-        Rbin_centres = (Rbin_edges[1:]+Rbin_edges[:-1])/2.
-        vcs = []
+    def get_data(self) -> Dict[int, Dict[str, np.array]]:
+        return self.data
 
-        for Rbmin, Rbmax in zip(Rbin_edges[:-1], Rbin_edges[1:]):
-            cnd = (self.gas_data['R_coords'] > Rbmin) & (self.gas_data['R_coords'] < Rbmax)
-            if(len(self.gas_data['R_coords'][cnd])>0):
+    def get_grid(self) -> Tuple[np.array, np.array, np.array]:
+        return self.Rbin_centers, self.phibin_centers, self.zbin_centers
+
+    def get_keys(self):
+            for key in vars(self).keys():
+                print(key)
+
+    def _select_predef_midplane(self, input_array: np.array) -> np.array:
+        '''If the mid-plane of the galaxy is already known from a previous calculation (e.g. from the minimum
+        of the gravitational potential), select the values at the mid-plane of the array.'''
+
+        midplane_value = np.zeros_like(self.midplane_idcs) * np.nan
+        for i in range(self.Rbinno):
+            for j in range(self.phibinno):
+                midplane_value[i,j] = input_array[i,j,self.midplane_idcs[i,j]]
+
+        return midplane_value
+
+    def _get_cached_force(self):
+        '''Avoid recomputation of this expensive method'''
+        if self._cached_force is None:
+            self._cached_force = self._get_int_force_left_right_xy()
+        return self._cached_force
+
+    def _get_int_force_left_right_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> Tuple[np.array, np.array, np.array]:
+        '''Get integrated force per unit area, separated into its components above and below
+        the mid-plane of the disk.'''
+
+        integrand = self._get_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
+        z_mp_idcs = np.nanargmin(np.nancumsum(integrand, axis=2), axis=2)
+
+        integrand_left = np.zeros_like(integrand)
+        integrand_right = np.zeros_like(integrand)
+        for i in range(self.xybinno):
+            for j in range(self.xybinno):
+                integrand_left[i,j,:z_mp_idcs[i,j]] = integrand[i,j,:z_mp_idcs[i,j]]
+                integrand_right[i,j,z_mp_idcs[i,j]:] = integrand[i,j,z_mp_idcs[i,j]:]
+                
+        return np.nansum(integrand_left, axis=2), np.nansum(integrand_right, axis=2), z_mp_idcs
+
+    ###----------- LR reliable features -----------###
+    
+    def get_surfdens_xy(self, PartType: int=None) -> np.array:
+        '''Get the 2D surface density in cgs'''
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_surfdens_xy.")
+        surfdens, _, _, _ = binned_statistic_2d(
+            self.data[PartType]["x_coords"], self.data[PartType]["y_coords"], self.data[PartType]["masses"],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        return surfdens / (self.xbin_width * self.ybin_width)
+
+    def _get_rotation_curve_R(self) -> np.array:
+        '''Get the 1D rotation curve of the galaxy, within the gas disk, in cm/s.'''
+
+        vcs = []
+        for Rbmin, Rbmax in zip(self.Rbin_edges[:-1], self.Rbin_edges[1:]):
+            cnd = (self.data[0]['R_coords'] > Rbmin) & (self.data[0]['R_coords'] < Rbmax)
+            if(len(self.data[0]['R_coords'][cnd])>0):
                 vcs.append(np.average(
-                    -self.gas_data['y_coords'][cnd]/self.gas_data['R_coords'][cnd] * self.gas_data['velxs'][cnd] +
-                    self.gas_data['x_coords'][cnd]/self.gas_data['R_coords'][cnd] * self.gas_data['velys'][cnd],
-                    weights=self.gas_data['masses'][cnd]))
+                    -self.data[0]['y_coords'][cnd]/self.data[0]['R_coords'][cnd] * self.data[0]['velxs'][cnd] +
+                    self.data[0]['x_coords'][cnd]/self.data[0]['R_coords'][cnd] * self.data[0]['velys'][cnd],
+                    weights=self.data[0]['masses'][cnd]))
             else:
                 vcs.append(np.nan)
 
-        return Rbin_centres, vcs
+        return np.array(vcs)
 
-    def get_Omegaz_array(self, deltaR: float=10.) -> np.array:
-        '''Get the galactic angular velocity in the z-direction, in /s.'''
-        Rbin_centres, vcs = self.get_rotation_curve(deltaR=deltaR)
-        Omegazs = vcs / Rbin_centres
+    def _get_Omegaz_R(self) -> np.array:
+        '''Get the 1D galactic angular velocity in the z-direction, in /s.'''
 
-        fOmegaz = interp1d(Rbin_centres, vcs, bounds_error=False, fill_value=(np.nan, np.nan))
-        R_grid = np.sqrt(self.x_grid**2 + self.y_grid**2)
-        return fOmegaz(R_grid)
+        vcs = self._get_rotation_curve_R()
+        Omegazs = vcs / self.Rbin_centers
+
+        return Omegazs
     
-    def get_kappa_array(self, deltaR: float=10., polyno: int=2, wndwlen: int=9) -> np.array:
-        '''Get the epicyclic frequency in the z-direction, in /s.'''
-        Rbin_centres, vcs = self.get_rotation_curve(deltaR=deltaR)
-        Omegazs = vcs / Rbin_centres
+    def _get_kappa_R(self, polyno: int=2, wndwlen: int=5) -> np.array:
+        '''Get the 1D epicyclic frequency in the z-direction, in /s.'''
 
-        dR = sg(Rbin_centres, wndwlen, polyno, deriv=1)
+        vcs = self._get_rotation_curve_R()
+        Omegazs = vcs / self.Rbin_centers
+
+        dR = sg(self.Rbin_centers, wndwlen, polyno, deriv=1)
         dvc = sg(vcs, wndwlen, polyno, deriv=1)
-        betas = dvc/dR * Rbin_centres/vcs
+        betas = dvc/dR * self.Rbin_centers/vcs
         kappas = Omegazs * np.sqrt(2.*(1.+betas))
 
-        fkappa = interp1d(Rbin_centres, kappas, bounds_error=False, fill_value=(np.nan, np.nan))
-        R_grid = np.sqrt(self.x_grid**2 + self.y_grid**2)
+        return kappas
+
+    def get_rotation_curve_xy(self) -> np.array:
+        '''Get the rotation curve of the galaxy by interpolating the 1D rotation curve, in cm/s'''
+        vc_R = self._get_rotation_curve_R()
+
+        fvc = interp1d(self.Rbin_centers, vc_R, bounds_error=False, fill_value=(np.nan, np.nan))
+        R_grid = np.sqrt(self.xbin_centers_2d**2 + self.ybin_centers_2d**2)
+        return fvc(R_grid)
+
+    def get_Omegaz_xy(self) -> np.array:
+        '''Get the galactic angular velocity of the galaxy by interpolating the 1D rotation curve, in cm/s'''
+        Omegaz_R = self._get_Omegaz_R()
+
+        fOmegaz = interp1d(self.Rbin_centers, Omegaz_R, bounds_error=False, fill_value=(np.nan, np.nan))
+        R_grid = np.sqrt(self.xbin_centers_2d**2 + self.ybin_centers_2d**2)
+        return fOmegaz(R_grid)
+    
+    def get_kappa_xy(self, polyno: int=2, wndwlen: int=5) -> np.array:
+        '''Get the epicyclic frequency of the galaxy by interpolating the 1D rotation curve, in cm/s'''
+        kappa_R = self._get_kappa_R(polyno, wndwlen)
+
+        fkappa = interp1d(self.Rbin_centers, kappa_R, bounds_error=False, fill_value=(np.nan, np.nan))
+        R_grid = np.sqrt(self.xbin_centers_2d**2 + self.ybin_centers_2d**2)
         return fkappa(R_grid)
 
-    def get_potential_z_grid(self) -> Tuple[int, np.array]:
-        ptl_z_binnum = int(np.ceil(2.*self.max_grid_height/self.ptl_resolution))
-        ptl_z_bin_edges = np.linspace(-self.max_grid_height, self.max_grid_height, ptl_z_binnum+1)
-        ptl_z_bin_centers = (ptl_z_bin_edges[1:]+ptl_z_bin_edges[:-1])*0.5
-        return ptl_z_binnum, ptl_z_bin_edges, ptl_z_bin_centers
+    ###----------- HR-only reliable features, LR cubes -----------###
 
-    def get_potential_array(self, leafsize: int=10, eps: float=6., p: int=1) -> np.array:
-        '''Get the potential array from the gas cells, in cgs units. Leafsize, eps and p
-        are performance parameters for the inverse distance interpolation. See description
-        in invdisttree.py'''
+    def get_SFR_voldens_xyz(self) -> np.array:
+        '''Gas star formation rate volume density in cgs units'''
+        SFR_densities = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
+            cnd = (self.data[0]["z_coords"] > zbmin) & (self.data[0]["z_coords"] < zbmax)
+            if len(self.data[0]["x_coords"][cnd]) == 0:
+                SFR_densities[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
+                continue
+            dens, _, _, _ = binned_statistic_2d(
+                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["SFRs"][cnd],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            SFR_densities[:,:,k] = dens / (self.xbin_width * self.ybin_width * self.zbin_width)
+        return SFR_densities
+    
+    def get_H2_mass_frac_xyz(self) -> np.array:
+        '''Get the H2 mass fraction, dimensionless'''
+        H2_frac = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
+            cnd = (self.data[0]["z_coords"] > zbmin) & (self.data[0]["z_coords"] < zbmax)
+            if len(self.data[0]["x_coords"][cnd]) == 0:
+                H2_frac[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
+                continue
+            H2mass, _, _, _ = binned_statistic_2d(
+                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd]*self.data[0]["xH2"],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            mass, _, _, _ = binned_statistic_2d(
+                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd]*self.data[0]["xH2"],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            H2_frac[:,:,k] = H2mass / mass
+        return H2_frac
+    
+    def get_HI_mass_frac_xyz(self) -> np.array:
+        '''Get the HI mass fraction, dimensionless'''
+        HI_frac = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
+            cnd = (self.data[0]["z_coords"] > zbmin) & (self.data[0]["z_coords"] < zbmax)
+            if len(self.data[0]["R_coords"][cnd]) == 0:
+                HI_frac[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
+                continue
+            HImass, _, _, _ = binned_statistic_2d(
+                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd]*self.data[0]["xHI"],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            mass, _, _, _ = binned_statistic_2d(
+                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            HI_frac[:,:,k] = HImass / mass
+        return HI_frac
 
-        if self.ptl_resolution == None:
-            raise ValueError("The vertical resolution for computation of the potential must be set to use this function.")
+    def get_density_xyz(self, zbinwidth: float=None, zbinedges: float=None, zbinno: float=None, PartType: int=None) -> np.array:
+        '''Get the 3D volume density in cgs'''
 
-        '''the z-grid for calculation of the potential needs to be sufficiently-fine to capture
-        density fluctations near the simulation resolution'''
-        ptl_z_binnum, ptl_z_bin_edges, ptl_z_bin_centers = self.get_potential_z_grid()
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_density_xyz.")
+        if zbinwidth==None:
+            zbinwidth = self.zbin_width
+            zbinedges = self.zbin_edges
+            zbinno = self.zbinno
 
-        snapdata_all = [self.read_snap_data(i) for i in range(5) if self.read_snap_data(i) != None]
-        snapdata_all = [self.set_realign_galaxy(snapdata) for snapdata in snapdata_all]
-        x_all = np.concatenate([snapdata["x_coords"] for snapdata in snapdata_all])
-        y_all = np.concatenate([snapdata["y_coords"] for snapdata in snapdata_all])
-        z_all = np.concatenate([snapdata["z_coords"] for snapdata in snapdata_all])
-        ptl_all = np.concatenate([snapdata["Potential"] for snapdata in snapdata_all])
+        densities = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["R_coords"][cnd]) == 0:
+                densities[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
+                continue
+            dens, _, _, _ = binned_statistic_2d(
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            densities[:,:,k] = dens / (self.xbin_width * self.ybin_width * zbinwidth)
+        return densities
 
-        x_grid, y_grid, z_grid = np.meshgrid(self.xbin_centers, self.ybin_centers, ptl_z_bin_centers)
 
-        invdisttree = Invdisttree(np.array([x_all, y_all, z_all]).T, ptl_all, leafsize=leafsize, stat=1)
-        ptl_grid = invdisttree(np.array([x_grid.flatten(), y_grid.flatten(), z_grid.flatten()]).T, nnear=8, eps=eps, p=p)
-        ptl_grid = np.reshape(ptl_grid, np.shape(x_grid))
+        '''Gas midplane thermal pressure (2D) in cgs units.'''
 
-        return ptl_grid
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_midplane_thermpress_Rphi.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_thermpress_Rphi (gas particles only).")
 
-    def get_rho_potential_array(self) -> np.array:
-        '''Get the density array corresponding to the potential grid, for computation of
-        interstellar medium weights, in cgs units.'''
+        Pth = np.zeros((self.xbinno, self.ybinno, self.zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["x_coords"][cnd]) == 0:
+                Pth[:,:,k] = np.ones((self.xbinno, self.ybinno)) * np.nan
+                continue
+            Pth_bin, _, _, _ = binned_statistic_2d(
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType]["U"][cnd],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            Pth[:,:,k] = Pth_bin / (self.xbin_width * self.ybin_width * self.zbin_width) # mass * U --> dens * U
 
-        if self.ptl_resolution == None:
-            raise ValueError("The vertical resolution for computation of the potential must be set to use this function.")
+        return np.nanmax(Pth * (ah.gamma-1.) / ah.kB_cgs, axis=2) # dens * U --> Ptherm
+    
+    def get_potential_xyz(
+        self,
+        PartTypes: List[int] = [0, 1, 2, 3, 4],
+        sigma: float=0., # smoothing parameter, defaults to 0.
+        eps: float=1., # shape parameter, defaults to 1.
+        phi: str="phs3", # 3rd-order polyharmonic spline
+        order: int=5, # at least q-1, where q is the order of the RBF of type phi
+        neighbors: int=150, # interpolant at each eval point uses this many observations, defaults to all
+    ):
+        '''Get the potential array from the gas cells, in cgs units. This uses the RBF
+        interpolation class at https://rbf.readthedocs.io/en/latest/.
+        Details about the optimization parameters given as keyword arguments in this
+        function can be found in these docs.'''
 
-        ptl_z_binnum, ptl_z_bin_edges, ptl_z_bin_centers = self.get_potential_z_grid()
+        try:
+            x_all = np.concatenate([self.data[i]["x_coords"] for i in PartTypes if self.data[i] is not None])
+            y_all = np.concatenate([self.data[i]["y_coords"] for i in PartTypes if self.data[i] is not None])
+            z_all = np.concatenate([self.data[i]["z_coords"] for i in PartTypes if self.data[i] is not None])
+            ptl_all = np.concatenate([self.data[i]["Potential"] for i in PartTypes if self.data[i] is not None])
+            coords_all = np.array([x_all, y_all, z_all]).T
+        except KeyError:
+            logger.critical("Requested particle types not loaded: {:s}".format(str([i for i in PartTypes if i not in self.data])))
+            sys.exit(1)
 
-        cnd = (self.gas_data["AlphaVir"] > 2.) | (self.gas_data["AlphaVir"] <= 0.) # cut out gas that's in gravitationally-bound clouds
-        x = self.gas_data["x_coords"][cnd]
-        y = self.gas_data["y_coords"][cnd]
-        z = self.gas_data["z_coords"][cnd]
-        mass = self.gas_data["masses"][cnd]
+        interp = RBFInterpolant(
+            coords_all,
+            ptl_all,
+            sigma=sigma,
+            eps=eps,
+            phi=phi,
+            order=order,
+            neighbors=neighbors
+        )
 
-        rho3Ds = np.zeros((self.xy_binnum, self.xy_binnum, ptl_z_binnum))
-        for zbmin, zbmax, k in zip(ptl_z_bin_edges[:-1], ptl_z_bin_edges[1:], range(ptl_z_binnum)):
-            cnd = (z > zbmin) & (z < zbmax)
-            mass_bin = mass[cnd]
-            x_bin = x[cnd]
-            y_bin = y[cnd]
+        coords_interp = np.array([self.xbin_centers_3d_ptl.flatten(), self.ybin_centers_3d_ptl.flatten(), self.zbin_centers_3d_ptl.flatten()]).T
+        return interp(coords_interp).reshape(self.xbinno, self.ybinno, self.zbinno_ptl)
 
-            masssum, xedges, yedges, binnumber = binned_statistic_2d(
-                x_bin, y_bin,
-                mass_bin,
-                bins=[self.xbin_edges, self.ybin_edges],
-                statistic='sum')
-            rho3Ds[:,:,k] = masssum/self.resolution/self.resolution/self.ptl_resolution
-        
-        return rho3Ds
+    def _get_weight_integrand_xyz(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> np.array:
+        '''Get the integrand for the weight function, in cgs units.'''
 
-    def get_weight_array(self, polyno: int=2, wndwlen: int=9) -> np.array:
-        '''Get the weights for the interstellar medium, based on the density and potential
-        grids. Polyno and wndlen are the parameters for the Savitzky-Golay filter, which
-        is used to take the z-derivative of the potential grid. Output in cgs units.'''
+        rho_grid = self.get_density_xyz(zbinsep=self.zbin_width_ptl, PartType=PartType)
+        ptl_grid = self.get_potential_xyz(PartTypes=PartTypes)
 
-        if self.ptl_resolution == None:
-            raise ValueError("The vertical resolution for computation of the potential must be set to use this function.")
-
-        ptl_z_binnum, ptl_z_bin_edges, ptl_z_bin_centers = self.get_potential_z_grid()
-        deltaz = ptl_z_bin_centers[1]-ptl_z_bin_centers[0]
-        x_grid, y_grid, z_grid = np.meshgrid(self.xbin_centers, self.ybin_centers, ptl_z_bin_centers)
-
-        rho_grid = self.get_rho_potential_array()
-        ptl_grid = self.get_potential_array()
-        
-        dz = sg(z_grid, wndwlen, polyno, deriv=1, axis=2)
-        dPhi = sg(ptl_grid, wndwlen, polyno, deriv=1, axis=2)
+        dz = np.gradient(self.zbin_centers_3d_ptl, axis=2)
+        dPhi = np.gradient(ptl_grid, axis=2)
         dPhidz = dPhi/dz
 
-        return np.sum(np.fabs(rho_grid*dPhidz*deltaz)/2., axis=2)
+        integrand = rho_grid * dPhidz * self.zbin_width_ptl
+        return integrand
 
-    def get_gas_surfdens_array(self) -> np.array:
-        '''Gas surface density in solar masses per pc^2'''
-        surfdens, x_edge, y_edge, binnumber = binned_statistic_2d(
-            self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["masses"],
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
+    def get_weight_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> np.array:
+        '''Get the weights for the interstellar medium, based on the density and potential
+        grids, assuming the potential is symmetrical about the mid-plane of the disk.'''
+
+        integrand = self._get_weight_integrand_Rphiz(PartTypes=PartTypes, PartType=PartType)
+        return np.nansum(np.fabs(integrand)/2., axis=2)
+
+    ###----------- HR-only reliable features, mid-plane -----------###
+
+    def get_midplane_density_xy(self, PartType: int=None) -> np.array:
+        '''Get the 3D mid-plane density in cgs.'''
+
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_midplane_turbpress_Rphi.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_turbpress_Rphi (gas particles only).")
+
+        dens_3D = self.get_density_xyz(
+            zbinwidth=self.zbin_width_ptl,
+            zbinedges=self.zbin_edges_ptl,
+            zbinno=self.zbinno_ptl,
+            PartType=PartType
         )
-        return surfdens/ah.Msol_to_g/(self.resolution/ah.pc_to_cm)**2
+        if self.midplane_idcs is not None:
+            return self._select_predef_midplane(dens_3D)
+        else: # estimate the mid-plane by returning the maximum value along the z-axis
+            return np.nanmax(dens_3D, axis=2)
 
-    def get_stellar_surfdens_array(self) -> np.array:
-        '''Stellar surface density in solar masses per pc^2'''
-        stardata_all = [self.read_snap_data(i) for i in [2,3,4] if self.read_snap_data(i) != None]
-        stardata_all = [self.set_realign_galaxy(stardata) for stardata in stardata_all]
-        x_stars = np.concatenate([stardata["x_coords"] for stardata in stardata_all])
-        y_stars = np.concatenate([stardata["y_coords"] for stardata in stardata_all])
-        z_stars = np.concatenate([stardata["z_coords"] for stardata in stardata_all])
-        mass_stars = np.concatenate([stardata["masses"] for stardata in stardata_all])
+    def _get_gas_av_vel_xyz_xy(
+        self,
+        z_min: float=None,
+        z_max: float=None,
+        PartType: int=None
+    ) -> Tuple[np.array, np.array, np.array]:
+        '''Get the average 2D gas velocity components in the x, y, and z directions, in cm/s.'''
 
-        surfdens, x_edge, y_edge, binnumber = binned_statistic_2d(
-            x_stars, y_stars, mass_stars,
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
-        )
-        return surfdens/ah.Msol_to_g/(self.resolution/ah.pc_to_cm)**2
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_av_vel_xyz_Rphi.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_av_vel_xyz_Rphi (gas particles only).")
 
-    def get_SFR_surfdens_array(self) -> np.array:
-        '''Gas star formation rate surface density in solar masses per kpc^2 per yr'''
-        SFR, x_edge, y_edge, binnumber = binned_statistic_2d(
-            self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["SFRs"],
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
-        )
-        return SFR/ah.Msol_to_g/(self.resolution/ah.kpc_to_cm)**2*ah.yr_to_s
+        if z_min==None:
+            z_min = -self.total_height
+        if z_max==None:
+            z_max = self.total_height
 
-    def get_midplane_gas_dens_array(self) -> np.array:
-        '''Gas volume density in solar masses per pc^3'''
-        dens, x_edge, y_edge, binnumber = binned_statistic_2d(
-            self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["masses"],
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
-        )
-        return dens/ah.Msol_to_g/(self.resolution/ah.pc_to_cm)**3
+        cnd = (self.data[PartType]["z_coords"] > z_min) & (self.data[PartType]["z_coords"] < z_max)
+        if len(self.data[PartType]["x_coords"][cnd]) == 0:
+            logger.critical("No gas cells found in the given z-range.")
 
-    def get_midplane_stellar_dens_array(self) -> np.array:
-        '''Stellar volume density in solar masses per pc^3'''
-        stardata_all = [self.read_snap_data(i) for i in [2,3,4] if self.read_snap_data(i) != None]
-        stardata_all = [self.set_realign_galaxy(stardata) for stardata in stardata_all]
-        x_stars = np.concatenate([stardata["x_coords"] for stardata in stardata_all])
-        y_stars = np.concatenate([stardata["y_coords"] for stardata in stardata_all])
-        z_stars = np.concatenate([stardata["z_coords"] for stardata in stardata_all])
-        mass_stars = np.concatenate([stardata["masses"] for stardata in stardata_all])
-
-        dens, x_edge, y_edge, binnumber = binned_statistic_2d(
-            x_stars, y_stars, mass_stars,
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
-        )
-        return dens/ah.Msol_to_g/(self.resolution/ah.pc_to_cm)**3
-
-    def get_midplane_SFR_dens_array(self) -> np.array:
-        '''Gas star formation rate volume density in solar masses per kpc^3 per yr'''
-        Sfr, x_edge, y_edge, binnumber = binned_statistic_2d(
-            self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["SFRs"],
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
-        )
-        return Sfr/ah.Msol_to_g/(self.resolution/ah.kpc_to_cm)**3*ah.yr_to_s
-
-    def get_gas_veldisps_xyz_array(self) -> Tuple[np.array, np.array, np.array]:
-        '''Gas velocity dispersion components in km/s'''
-        sumrhos, x_edge, y_edge, binnumber = binned_statistic_2d(
-            self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["masses"],
-            bins=(self.xbin_edges, self.ybin_edges),
+        summass, _, _, _ = binned_statistic_2d(
+            self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd],
+            bins=(self.xbin_edges, self.ybin_edges), expand_binnumbers=True,
             statistic='sum'
         )
 
-        veldisps_xyz = []
-        maxbinnumber = int(np.rint(self.max_grid_width/self.resolution))
+        meanvels = []
         for velstring in ["velxs", "velys", "velzs"]:
-            summeanvel, x_edge, y_edge, binnumber = binned_statistic_2d(
-                self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["masses"]*self.gas_data[velstring],
+            meanvel, _, _, _ = binned_statistic_2d(
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType][velstring][cnd],
                 bins=(self.xbin_edges, self.ybin_edges), expand_binnumbers=True,
                 statistic='sum'
             )
-            meanvel = summeanvel/sumrhos
+            meanvel /= summass
+            meanvels.append(meanvel)
 
-            bn_x, bn_y = binnumber
-            bn_x[bn_x>maxbinnumber] = maxbinnumber
-            bn_y[bn_y>maxbinnumber] = maxbinnumber
+        return tuple(meanvels)
+
+    def _get_gas_veldisps_xyz_xy(
+        self,
+        meanvels_xyz: Tuple=None,
+        z_min: float=None,
+        z_max: float=None,
+        PartType: int=None,
+    ) -> Tuple[np.array, np.array, np.array]:
+        '''2D Gas velocity dispersion components in cgs. Distinct from the mid-plane turbulent
+        velocity dispersion, this is the velocity dispersion along columns in z.'''
+
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_veldisps_xyz_Rphi.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_veldisps_xyz_Rphi (gas particles only).")
+
+        if z_min==None:
+            z_min = -self.total_height
+        if z_max==None:
+            z_max = self.total_height
+
+        cnd = (self.data[PartType]["z_coords"] > z_min) & (self.data[PartType]["z_coords"] < z_max)
+        if len(self.data[PartType]["x_coords"][cnd]) == 0:
+            logger.critical("No gas cells found in the given z-range.")
+
+        summass, x_edge, y_edge, binnumbers = binned_statistic_2d(
+            self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd],
+            bins=(self.xbin_edges, self.ybin_edges), expand_binnumbers=True,
+            statistic='sum'
+        )
+
+        '''Subtract the mean velocity in each bin from the velocity components, then take the
+        root-mean-square of the differences to get the velocity dispersions.'''
+        if meanvels_xyz==None:
+            meanvels = self._get_gas_av_vel_xyz_xy(z_min=z_min, z_max=z_max, PartType=PartType)
+        else:
+            meanvels = meanvels_xyz
+
+        maxbinnumber_x = len(x_edge)-1
+        maxbinnumber_y = len(y_edge)-1
+        veldisps_xyz = []
+        for velstring, meanvel in zip(["velxs", "velys", "velzs"], meanvels):
+            bn_x, bn_y = binnumbers.copy()
+            bn_x[bn_x>maxbinnumber_x] = maxbinnumber_x
+            bn_y[bn_y>maxbinnumber_y] = maxbinnumber_y
             bn_x[bn_x<1] = 1
             bn_y[bn_y<1] = 1
             bn_x -= 1
             bn_y -= 1
-            vel_minus_mean = self.gas_data[velstring]-meanvel[bn_x, bn_y]
+            vel_minus_mean = self.data[PartType][velstring][cnd]-meanvel[bn_x, bn_y]
 
-            sumveldisp, x_edge, y_edge, binnumber = binned_statistic_2d(
-                self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["masses"]*vel_minus_mean**2,
+            sumveldisp, _, _, _ = binned_statistic_2d(
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*vel_minus_mean**2,
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
-            veldisps_xyz.append(np.sqrt(sumveldisp/sumrhos)/ah.kms_to_cms)
+            veldisps_xyz.append(np.sqrt(sumveldisp/summass))
 
         return tuple(veldisps_xyz)
 
-    def get_gas_turbpress_array(self) -> np.array:
-        '''Gas turbulent pressure in cgs units'''
-        veldisps_xyz = self.get_gas_veldisps_xyz_array()
-        return veldisps_xyz[2]**2 * ah.kms_to_cms**2 * self.get_midplane_gas_dens_array()*ah.Msol_to_g/ah.pc_to_cm**3 / ah.kB_cgs
+    def get_gas_midplane_veldisps_xyz_xy(
+        self,
+        PartType: int=None,
+    ) -> Tuple[np.array, np.array, np.array]:
+        meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        veldisps_x = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        veldisps_y = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["x_coords"][cnd]) == 0:
+                veldisps_z[:,:,k] = np.ones((self.xybinno, self.xybinno)) * np.nan
+                continue
+            veldisp_x, veldisp_y, veldisp_z = self._get_gas_veldisps_xyz_xy(meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
+            veldisps_x[:,:,k] = veldisp_x
+            veldisps_y[:,:,k] = veldisp_y
+            veldisps_z[:,:,k] = veldisp_z
 
-    def get_gas_thermpress_array(self) -> np.array:
-        '''Gas thermal pressure in cgs units'''
-        Pth, x_edge, y_edge, binnumber = binned_statistic_2d(
-            self.gas_data["x_coords"], self.gas_data["y_coords"], self.gas_data["masses"]*self.gas_data["U"],
-            bins=(self.xbin_edges, self.ybin_edges),
-            statistic='sum'
-        )
-        return Pth * (ah.gamma-1.) / ah.kB_cgs * ah.mu * ah.mp_cgs / ah.Msol_to_g / (self.resolution/ah.pc_to_cm)**3
+        if self.midplane_idcs is not None:
+            return self._select_predef_midplane(veldisps_x), self._select_predef_midplane(veldisps_y), self._select_predef_midplane(veldisps_z)
+        else: # estimate the mid-plane by returning the maximum value along the z-axis
+            return np.nanmax(veldisps_x, axis=2), np.nanmax(veldisps_y, axis=2), np.nanmax(veldisps_z, axis=2)
+
+    def _get_gas_turbpress_xyz(self, PartType: int=None) -> np.array:
+        '''3D Gas turbulent pressure in cgs units, divided by the Boltzmann constant.'''
+
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_turbpress_Rphiz.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_turbpress_Rphiz (gas particles only).")
+
+        density = self.get_density_xyz(PartType=PartType)
+
+        veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
+        meanvels = self.get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["x_coords"][cnd]) == 0:
+                veldisps_z[:,:,k] = np.ones((self.xybinno, self.xybinno)) * np.nan
+                continue
+            _, _, veldisp_z = self._get_gas_veldisps_xyz_xy(meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
+            veldisps_z[:,:,k] = veldisp_z
+        
+        turbpress_3D = veldisps_z**2 * density / ah.kB_cgs
+
+        return turbpress_3D
+
+    def get_gas_midplane_turbpress_xy(self, PartType: int=None) -> np.array:
+        '''Mid-plane gas turbulent pressure (2D) in the vertical/plane-perpendicular direction, in cgs units,
+        divided by the Boltzmann constant.'''
+
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_midplane_turbpress_Rphi.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_turbpress_Rphi (gas particles only).")
+
+        turbpress_3D = self._get_gas_turbpress_xyz(PartType=PartType)
+        if self.midplane_idcs is not None:
+            return self._select_predef_midplane(turbpress_3D)
+        else: # estimate the mid-plane by returning the maximum value along the z-axis
+            return np.nanmax(turbpress_3D, axis=2)
+
+    def get_gas_midplane_thermpress_xy(self, PartType: int=None) -> np.array:
+        '''Gas midplane thermal pressure (2D) in cgs units.'''
+
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_gas_midplane_thermpress_Rphi.")
+        if PartType!=0 and PartType!=6:
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_thermpress_Rphi (gas particles only).")
+
+        Pth = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["x_coords"][cnd]) == 0:
+                Pth[:,:,k] = np.ones((self.xybinno, self.xybinno)) * np.nan
+                continue
+            Pth_bin, _, _, _ = binned_statistic_2d(
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType]["U"][cnd],
+                bins=(self.xbin_edges, self.ybin_edges),
+                statistic='sum'
+            )
+            Pth[:,:,k] = Pth_bin / (self.xybin_width * self.xybin_width * self.zbin_width_ptl) # mass * U --> dens * U
+
+        if self.midplane_idcs is not None:
+            return self._select_predef_midplane(Pth)
+        else:
+            return np.nanmax(Pth * (ah.gamma-1.) / ah.kB_cgs, axis=2) # dens * U --> Ptherm
