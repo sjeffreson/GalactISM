@@ -1,5 +1,6 @@
 from typing import Dict, List, Tuple
 from pathlib import Path
+import sys
 import numpy as np
 
 from scipy.signal import savgol_filter as sg
@@ -113,9 +114,10 @@ class GriddedDataset:
         self.ybin_centers_2d = self.ybin_centers_2d.T
 
         '''R-bins for the rotation curve'''
-        self.Rmax = self.xymax
-        self.Rbinno = int(np.rint(self.Rmax/self.rotcurve_rsln))
-        self.Rbin_edges = np.linspace(0., self.Rmax, self.Rbinno+1)
+        self.xymax = self.xymax
+        self.Rbinno = int(np.rint(self.xymax/self.rotcurve_rsln))
+        self.Rbin_edges = np.linspace(0., self.xymax, self.Rbinno+1)
+        self.Rbin_centers = (self.Rbin_edges[1:]+self.Rbin_edges[:-1])/2.
 
         '''Finer z-grid for the potential'''
         self.zbinno_ptl = int(np.rint(2.*self.total_height/self.zbin_width_ptl))
@@ -129,23 +131,26 @@ class GriddedDataset:
     
         '''Keywords to access methods'''
         self._method_map = {
-            'SFR_voldens_midplane': lambda: self.get_SFR_voldens_xyz(),
-            'H2_frac': lambda: self.get_H2_mass_frac_xyz(),
-            'HI_frac': lambda: self.get_HI_mass_frac_xyz(),
-            'gas_voldens': lambda: self.get_density_xyz(PartType=0),
-            'star_voldens': lambda: self.get_density_xyz(PartType=5),
-            'gas_voldens_midplane': self.get_midplane_density_xy(PartType=0),
-            'star_voldens_midplane': self.get_midplane_density_xy(PartType=5),
+            'SFR_surfdens': lambda: self.get_SFR_surfdens_xy(),
+            'H2_frac': lambda: self.get_H2_mass_frac_xy(),
+            'HI_frac': lambda: self.get_HI_mass_frac_xy(),
             'gas_surfdens': lambda: self.get_surfdens_xy(PartType=0),
             'star_surfdens': lambda: self.get_surfdens_xy(PartType=5),
             'rotcurve': lambda: self.get_rotation_curve_xy(),
             'kappa': lambda: self.get_kappa_xy(),
-            'veldisp_3D': lambda: self.get_gas_midplane_veldisps_xyz_xyz(),
+            'PtlMinIdcs': lambda: self.get_cached_force()[2],
+            'gas_voldens_midplane': self.get_midplane_density_xy(PartType=0),
+            'star_voldens_midplane': self.get_midplane_density_xy(PartType=5),
+            'veldisp_midplane': lambda: self.get_gas_midplane_veldisps_xyz_xy(),
             'Pturb': lambda: self.get_gas_midplane_turbpress_xy(),
             'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(),
-            'Phi': lambda:self.get_potential_xyz(),
             'weight': lambda: self.get_weight_xy() / ah.kB_cgs,
-            'PtlMinIdcs': lambda: self._get_cached_force()[2],
+            # 'SFR_voldens_3D': lambda: self.get_SFR_voldens_xyz(), # for later
+            # 'H2_frac_3D': lambda: self.get_H2_mass_frac_xyz(),
+            # 'HI_frac_3D': lambda: self.get_HI_mass_frac_xyz(),
+            # 'Phi': lambda:self.get_potential_xyz(),
+            # 'gas_voldens': lambda: self.get_density_xyz(PartType=0),
+            # 'star_voldens': lambda: self.get_density_xyz(PartType=5),
         }
 
     def get_prop_by_keyword(self, keyword: str) -> np.array:
@@ -218,7 +223,7 @@ class GriddedDataset:
     def _cut_out_particles(self, PartType: int=0) -> Dict[str, np.array]:
         '''Cut out most of the gas cells that are in the background grid, not the disk'''
 
-        cnd = (self.data[PartType]["R_coords"] < self.Rmax) & (np.fabs(self.data[PartType]["z_coords"]) < self.Rmax)
+        cnd = (self.data[PartType]["R_coords"] < self.xymax) & (np.fabs(self.data[PartType]["z_coords"]) < self.xymax)
         return {key: value[cnd] for key, value in self.data[PartType].items()}
 
     def _get_disk_COM(self) -> Tuple[float, float, float, float, float, float]:
@@ -325,7 +330,7 @@ class GriddedDataset:
         return self.data
 
     def get_grid(self) -> Tuple[np.array, np.array, np.array]:
-        return self.Rbin_centers, self.phibin_centers, self.zbin_centers
+        return self.xbin_centers, self.ybin_centers, self.zbin_centers
 
     def get_keys(self):
             for key in vars(self).keys():
@@ -336,13 +341,13 @@ class GriddedDataset:
         of the gravitational potential), select the values at the mid-plane of the array.'''
 
         midplane_value = np.zeros_like(self.midplane_idcs) * np.nan
-        for i in range(self.Rbinno):
-            for j in range(self.phibinno):
+        for i in range(self.xybinno):
+            for j in range(self.xybinno):
                 midplane_value[i,j] = input_array[i,j,self.midplane_idcs[i,j]]
 
         return midplane_value
 
-    def _get_cached_force(self):
+    def get_cached_force(self):
         '''Avoid recomputation of this expensive method'''
         if self._cached_force is None:
             self._cached_force = self._get_int_force_left_right_xy()
@@ -375,7 +380,7 @@ class GriddedDataset:
             bins=(self.xbin_edges, self.ybin_edges),
             statistic='sum'
         )
-        return surfdens / (self.xbin_width * self.ybin_width)
+        return surfdens / (self.xybin_width * self.xybin_width)
 
     def _get_rotation_curve_R(self) -> np.array:
         '''Get the 1D rotation curve of the galaxy, within the gas disk, in cm/s.'''
@@ -440,6 +445,15 @@ class GriddedDataset:
 
     ###----------- HR-only reliable features, LR cubes -----------###
 
+    def get_SFR_surfdens_xy(self) -> np.array:
+        '''Get the 2D surface density of the star formation rate in cgs'''
+        SFR_surfdens, _, _, _ = binned_statistic_2d(
+            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["SFRs"],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        return SFR_surfdens / (self.xybin_width * self.xybin_width)
+
     def get_SFR_voldens_xyz(self) -> np.array:
         '''Gas star formation rate volume density in cgs units'''
         SFR_densities = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
@@ -453,9 +467,23 @@ class GriddedDataset:
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
-            SFR_densities[:,:,k] = dens / (self.xbin_width * self.ybin_width * self.zbin_width)
+            SFR_densities[:,:,k] = dens / (self.xybin_width * self.xybin_width * self.zbin_width)
         return SFR_densities
     
+    def get_H2_mass_frac_xy(self) -> np.array:
+        '''Get the H2 mass fraction per 2D column, dimensionless'''
+        H2_frac, _, _, _ = binned_statistic_2d(
+            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"]*self.data[0]["xH2"],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        mass, _, _, _ = binned_statistic_2d(
+            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        return H2_frac / mass
+
     def get_H2_mass_frac_xyz(self) -> np.array:
         '''Get the H2 mass fraction, dimensionless'''
         H2_frac = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
@@ -477,6 +505,20 @@ class GriddedDataset:
             H2_frac[:,:,k] = H2mass / mass
         return H2_frac
     
+    def get_HI_mass_frac_xy(self) -> np.array:
+        '''Get the HI mass fraction per 2D column, dimensionless'''
+        HI_frac, _, _, _ = binned_statistic_2d(
+            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"]*self.data[0]["xHI"],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        mass, _, _, _ = binned_statistic_2d(
+            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        return HI_frac / mass
+
     def get_HI_mass_frac_xyz(self) -> np.array:
         '''Get the HI mass fraction, dimensionless'''
         HI_frac = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
@@ -504,12 +546,12 @@ class GriddedDataset:
         if PartType==None:
             logger.critical("Please specify a particle type for get_density_xyz.")
         if zbinwidth==None:
-            zbinwidth = self.zbin_width
-            zbinedges = self.zbin_edges
-            zbinno = self.zbinno
+            zbinwidth = self.zbin_width_ptl
+            zbinedges = self.zbin_edges_ptl
+            zbinno = self.zbinno_ptl
 
-        densities = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
-        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
+        densities = np.zeros((self.xybinno, self.xybinno, zbinno)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(zbinno)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
             if len(self.data[PartType]["R_coords"][cnd]) == 0:
                 densities[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
@@ -519,31 +561,8 @@ class GriddedDataset:
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
-            densities[:,:,k] = dens / (self.xbin_width * self.ybin_width * zbinwidth)
+            densities[:,:,k] = dens / (self.xybin_width * self.xybin_width * zbinwidth)
         return densities
-
-
-        '''Gas midplane thermal pressure (2D) in cgs units.'''
-
-        if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_midplane_thermpress_Rphi.")
-        if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_thermpress_Rphi (gas particles only).")
-
-        Pth = np.zeros((self.xbinno, self.ybinno, self.zbinno)) * np.nan
-        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
-            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
-            if len(self.data[PartType]["x_coords"][cnd]) == 0:
-                Pth[:,:,k] = np.ones((self.xbinno, self.ybinno)) * np.nan
-                continue
-            Pth_bin, _, _, _ = binned_statistic_2d(
-                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType]["U"][cnd],
-                bins=(self.xbin_edges, self.ybin_edges),
-                statistic='sum'
-            )
-            Pth[:,:,k] = Pth_bin / (self.xbin_width * self.ybin_width * self.zbin_width) # mass * U --> dens * U
-
-        return np.nanmax(Pth * (ah.gamma-1.) / ah.kB_cgs, axis=2) # dens * U --> Ptherm
     
     def get_potential_xyz(
         self,
@@ -580,12 +599,12 @@ class GriddedDataset:
         )
 
         coords_interp = np.array([self.xbin_centers_3d_ptl.flatten(), self.ybin_centers_3d_ptl.flatten(), self.zbin_centers_3d_ptl.flatten()]).T
-        return interp(coords_interp).reshape(self.xbinno, self.ybinno, self.zbinno_ptl)
+        return interp(coords_interp).reshape(self.xybinno, self.xybinno, self.zbinno_ptl)
 
     def _get_weight_integrand_xyz(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> np.array:
         '''Get the integrand for the weight function, in cgs units.'''
 
-        rho_grid = self.get_density_xyz(zbinsep=self.zbin_width_ptl, PartType=PartType)
+        rho_grid = self.get_density_xyz(PartType=PartType)
         ptl_grid = self.get_potential_xyz(PartTypes=PartTypes)
 
         dz = np.gradient(self.zbin_centers_3d_ptl, axis=2)
@@ -599,7 +618,7 @@ class GriddedDataset:
         '''Get the weights for the interstellar medium, based on the density and potential
         grids, assuming the potential is symmetrical about the mid-plane of the disk.'''
 
-        integrand = self._get_weight_integrand_Rphiz(PartTypes=PartTypes, PartType=PartType)
+        integrand = self._get_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
         return np.nansum(np.fabs(integrand)/2., axis=2)
 
     ###----------- HR-only reliable features, mid-plane -----------###
@@ -608,16 +627,9 @@ class GriddedDataset:
         '''Get the 3D mid-plane density in cgs.'''
 
         if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_midplane_turbpress_Rphi.")
-        if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_turbpress_Rphi (gas particles only).")
+            logger.critical("Please specify a particle type for get_midplane_density_xy.")
 
-        dens_3D = self.get_density_xyz(
-            zbinwidth=self.zbin_width_ptl,
-            zbinedges=self.zbin_edges_ptl,
-            zbinno=self.zbinno_ptl,
-            PartType=PartType
-        )
+        dens_3D = self.get_density_xyz(PartType=PartType)
         if self.midplane_idcs is not None:
             return self._select_predef_midplane(dens_3D)
         else: # estimate the mid-plane by returning the maximum value along the z-axis
@@ -632,9 +644,9 @@ class GriddedDataset:
         '''Get the average 2D gas velocity components in the x, y, and z directions, in cm/s.'''
 
         if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_av_vel_xyz_Rphi.")
+            logger.critical("Please specify a particle type for _get_gas_av_vel_xyz_xy.")
         if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_av_vel_xyz_Rphi (gas particles only).")
+            logger.critical("Please set PartType0 or PartType 6 in _get_gas_av_vel_xyz_xy (gas particles only).")
 
         if z_min==None:
             z_min = -self.total_height
@@ -674,9 +686,9 @@ class GriddedDataset:
         velocity dispersion, this is the velocity dispersion along columns in z.'''
 
         if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_veldisps_xyz_Rphi.")
+            logger.critical("Please specify a particle type for get_gas_veldisps_xyz_xy.")
         if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_veldisps_xyz_Rphi (gas particles only).")
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_veldisps_xyz_xy (gas particles only).")
 
         if z_min==None:
             z_min = -self.total_height
@@ -750,14 +762,14 @@ class GriddedDataset:
         '''3D Gas turbulent pressure in cgs units, divided by the Boltzmann constant.'''
 
         if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_turbpress_Rphiz.")
+            logger.critical("Please specify a particle type for get_gas_turbpress_xyz.")
         if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_turbpress_Rphiz (gas particles only).")
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_turbpress_xyz (gas particles only).")
 
         density = self.get_density_xyz(PartType=PartType)
 
         veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
-        meanvels = self.get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
         for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
             if len(self.data[PartType]["x_coords"][cnd]) == 0:
@@ -775,9 +787,9 @@ class GriddedDataset:
         divided by the Boltzmann constant.'''
 
         if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_midplane_turbpress_Rphi.")
+            logger.critical("Please specify a particle type for get_gas_midplane_turbpress_xy.")
         if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_turbpress_Rphi (gas particles only).")
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_turbpress_xy (gas particles only).")
 
         turbpress_3D = self._get_gas_turbpress_xyz(PartType=PartType)
         if self.midplane_idcs is not None:
@@ -789,11 +801,11 @@ class GriddedDataset:
         '''Gas midplane thermal pressure (2D) in cgs units.'''
 
         if PartType==None:
-            logger.critical("Please specify a particle type for get_gas_midplane_thermpress_Rphi.")
+            logger.critical("Please specify a particle type for get_gas_midplane_thermpress_xy.")
         if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_thermpress_Rphi (gas particles only).")
+            logger.critical("Please set PartType0 or PartType 6 in get_gas_midplane_thermpress_xy (gas particles only).")
 
-        Pth = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        Pth = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
         for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
             if len(self.data[PartType]["x_coords"][cnd]) == 0:
@@ -807,6 +819,6 @@ class GriddedDataset:
             Pth[:,:,k] = Pth_bin / (self.xybin_width * self.xybin_width * self.zbin_width_ptl) # mass * U --> dens * U
 
         if self.midplane_idcs is not None:
-            return self._select_predef_midplane(Pth)
+            return self._select_predef_midplane(Pth * (ah.gamma-1.) / ah.kB_cgs)
         else:
             return np.nanmax(Pth * (ah.gamma-1.) / ah.kB_cgs, axis=2) # dens * U --> Ptherm
