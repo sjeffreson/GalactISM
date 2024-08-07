@@ -57,6 +57,7 @@ class GriddedDataset:
         self.midplane_idcs = midplane_idcs
         self.realign_galaxy_to_gas = realign_galaxy_to_gas
         self.realign_galaxy_to_disk = realign_galaxy_to_disk
+        self._weight_integrand = None
 
         '''Load all required data'''
         self.data = {}
@@ -138,13 +139,17 @@ class GriddedDataset:
             'star_surfdens': lambda: self.get_surfdens_xy(PartType=5),
             'rotcurve': lambda: self.get_rotation_curve_xy(),
             'kappa': lambda: self.get_kappa_xy(),
-            'PtlMinIdcs': lambda: self.get_cached_force()[2],
-            'gas_voldens_midplane': self.get_midplane_density_xy(PartType=0),
+            'PtlMinIdcs': lambda: self.get_int_force_left_right_xy(PartType=6)[2],
+            'gas_voldens_midplane_total': self.get_midplane_density_xy(PartType=0),
+            'gas_voldens_midplane_coolwarm': self.get_midplane_density_xy(PartType=6),
             'star_voldens_midplane': self.get_midplane_density_xy(PartType=5),
             'veldisp_midplane': lambda: self.get_gas_midplane_veldisps_xyz_xy(),
-            'Pturb': lambda: self.get_gas_midplane_turbpress_xy(),
-            'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(),
-            'weight': lambda: self.get_weight_xy() / ah.kB_cgs,
+            'Pturb': lambda: self.get_gas_midplane_turbpress_xy(PartType=6),
+            'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(PartType=6),
+            'weight': lambda: self.get_weight_xy(PartType=6) / ah.kB_cgs,
+            'ForceLeft': lambda: self.get_int_force_left_right_xy(PartType=6)[0] / ah.kB_cgs, # alternative way to compute weight
+            'ForceRight': lambda: self.get_int_force_left_right_xy(PartType=6)[1] / ah.kB_cgs,
+            'Force': lambda: self.get_force_xy(PartType=6) / ah.kB_cgs,
             # 'SFR_voldens_3D': lambda: self.get_SFR_voldens_xyz(), # for later
             # 'H2_frac_3D': lambda: self.get_H2_mass_frac_xyz(),
             # 'HI_frac_3D': lambda: self.get_HI_mass_frac_xyz(),
@@ -347,30 +352,8 @@ class GriddedDataset:
 
         return midplane_value
 
-    def get_cached_force(self):
-        '''Avoid recomputation of this expensive method'''
-        if self._cached_force is None:
-            self._cached_force = self._get_int_force_left_right_xy()
-        return self._cached_force
-
-    def _get_int_force_left_right_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> Tuple[np.array, np.array, np.array]:
-        '''Get integrated force per unit area, separated into its components above and below
-        the mid-plane of the disk.'''
-
-        integrand = self._get_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
-        z_mp_idcs = np.nanargmin(np.nancumsum(integrand, axis=2), axis=2)
-
-        integrand_left = np.zeros_like(integrand)
-        integrand_right = np.zeros_like(integrand)
-        for i in range(self.xybinno):
-            for j in range(self.xybinno):
-                integrand_left[i,j,:z_mp_idcs[i,j]] = integrand[i,j,:z_mp_idcs[i,j]]
-                integrand_right[i,j,z_mp_idcs[i,j]:] = integrand[i,j,z_mp_idcs[i,j]:]
-                
-        return np.nansum(integrand_left, axis=2), np.nansum(integrand_right, axis=2), z_mp_idcs
-
     ###----------- LR reliable features -----------###
-    
+
     def get_surfdens_xy(self, PartType: int=None) -> np.array:
         '''Get the 2D surface density in cgs'''
         if PartType==None:
@@ -588,6 +571,7 @@ class GriddedDataset:
             logger.critical("Requested particle types not loaded: {:s}".format(str([i for i in PartTypes if i not in self.data])))
             sys.exit(1)
 
+        print(len(x_all), len(y_all), len(z_all), len(ptl_all))
         interp = RBFInterpolant(
             coords_all,
             ptl_all,
@@ -601,25 +585,55 @@ class GriddedDataset:
         coords_interp = np.array([self.xbin_centers_3d_ptl.flatten(), self.ybin_centers_3d_ptl.flatten(), self.zbin_centers_3d_ptl.flatten()]).T
         return interp(coords_interp).reshape(self.xybinno, self.xybinno, self.zbinno_ptl)
 
-    def _get_weight_integrand_xyz(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> np.array:
+    def _set_weight_integrand_xyz(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=None) -> np.array:
         '''Get the integrand for the weight function, in cgs units.'''
 
         rho_grid = self.get_density_xyz(PartType=PartType)
+        print('computed density')
         ptl_grid = self.get_potential_xyz(PartTypes=PartTypes)
+        print('computed potential')
 
         dz = np.gradient(self.zbin_centers_3d_ptl, axis=2)
         dPhi = np.gradient(ptl_grid, axis=2)
         dPhidz = dPhi/dz
 
-        integrand = rho_grid * dPhidz * self.zbin_width_ptl
-        return integrand
+        self._weight_integrand = rho_grid * dPhidz * self.zbin_width_ptl
 
-    def get_weight_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=0) -> np.array:
+    def get_weight_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=None) -> np.array:
         '''Get the weights for the interstellar medium, based on the density and potential
         grids, assuming the potential is symmetrical about the mid-plane of the disk.'''
 
-        integrand = self._get_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
-        return np.nansum(np.fabs(integrand)/2., axis=2)
+        if PartType==None:
+            logger.critical("Please specify a particle type for get_weight_xy (this is used for computing\
+                            the density, all gas is used for the potential).")
+
+        if self._weight_integrand is None:
+            self._set_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
+        return np.nansum(np.fabs(self._weight_integrand)/2., axis=2)
+
+    def get_int_force_left_right_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=None) -> Tuple[np.array, np.array, np.array]:
+        '''Get integrated force per unit area, separated into its components above and below
+        the mid-plane of the disk.'''
+
+        if self._weight_integrand is None:
+            self._set_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
+        z_mp_idcs = np.nanargmin(np.nancumsum(self._weight_integrand, axis=2), axis=2)
+
+        integrand_left = np.zeros_like(self._weight_integrand)
+        integrand_right = np.zeros_like(self._weight_integrand)
+        for i in range(self.xybinno):
+            for j in range(self.xybinno):
+                integrand_left[i,j,:z_mp_idcs[i,j]] = self._weight_integrand[i,j,:z_mp_idcs[i,j]]
+                integrand_right[i,j,z_mp_idcs[i,j]:] = self._weight_integrand[i,j,z_mp_idcs[i,j]:]
+                
+        return np.nansum(integrand_left, axis=2), np.nansum(integrand_right, axis=2), z_mp_idcs
+
+    def get_force_xy(self, PartTypes: List[int] = [0,1,2,3,4], PartType: int=6) -> np.array:
+        '''Get the net force resulting from an asymmetric potential, in cgs units.'''
+
+        if self._weight_integrand is None:
+            self._set_weight_integrand_xyz(PartTypes=PartTypes, PartType=PartType)
+        return np.nansum(self._weight_integrand, axis=2)
 
     ###----------- HR-only reliable features, mid-plane -----------###
 
