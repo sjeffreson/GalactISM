@@ -6,7 +6,7 @@ import numpy as np
 from scipy.signal import savgol_filter as sg
 from scipy.stats import binned_statistic_2d
 from scipy.interpolate import interp1d
-from rbf.interpolate import RBFInterpolant
+from scipy.interpolate import RBFInterpolator
 
 import h5py
 import astro_helper as ah
@@ -549,17 +549,13 @@ class GriddedDataset:
     
     def get_potential_xyz(
         self,
-        PartTypes: List[int] = [0, 1, 2, 3, 4],
-        sigma: float=0., # smoothing parameter, defaults to 0.
+        PartTypes: List[int] = [0,1,2,3,4],
         eps: float=1., # shape parameter, defaults to 1.
-        phi: str="phs3", # 3rd-order polyharmonic spline
-        order: int=5, # at least q-1, where q is the order of the RBF of type phi
-        neighbors: int=150, # interpolant at each eval point uses this many observations, defaults to all
+        kernel: str="cubic", # 3rd-order polyharmonic spline
+        neighbors: int=32 # number of neighbors to use for the interpolation
     ):
         '''Get the potential array from the gas cells, in cgs units. This uses the RBF
-        interpolation class at https://rbf.readthedocs.io/en/latest/.
-        Details about the optimization parameters given as keyword arguments in this
-        function can be found in these docs.'''
+        interpolation class from scipy.'''
 
         try:
             x_all = np.concatenate([self.data[i]["x_coords"] for i in PartTypes if self.data[i] is not None])
@@ -572,13 +568,11 @@ class GriddedDataset:
             sys.exit(1)
 
         print(len(x_all), len(y_all), len(z_all), len(ptl_all))
-        interp = RBFInterpolant(
+        interp = RBFInterpolator(
             coords_all,
             ptl_all,
-            sigma=sigma,
-            eps=eps,
-            phi=phi,
-            order=order,
+            kernel=kernel,
+            epsilon=eps,
             neighbors=neighbors
         )
 
