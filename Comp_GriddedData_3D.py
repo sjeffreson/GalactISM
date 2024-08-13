@@ -67,9 +67,9 @@ for snapname in snapnames:
         total_height=params.getfloat('TOT_HEIGHT'), # kpc
         zbin_width_ptl=10., # so it's quicker for checking
         xymax=params.getfloat('XYMAX'), # kpc
-        xybin_width=params.getfloat('XYBINWIDTH'),
+        xybin_width=params.getfloat('XYBINWIDTH'), # pc
         snapname=snapname,
-        midplane_idcs=midplane_idcs,
+        #midplane_idcs=midplane_idcs,
         exclude_temp_above=EXCLUDE_TEMP,
         exclude_avir_below=EXCLUDE_AVIR,
         exclude_HII=EXCLUDE_HII,
@@ -78,7 +78,7 @@ for snapname in snapnames:
     )
 
     for prop in PROPS:
-        axisnum = 2
+        axisnum = 3
         if props_3D[prop] is None:
             props_3D[prop] = gal.get_prop_by_keyword(prop)
         elif props_3D[prop].ndim == axisnum:

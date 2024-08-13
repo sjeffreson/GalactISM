@@ -132,29 +132,28 @@ class GriddedDataset:
     
         '''Keywords to access methods'''
         self._method_map = {
-            'SFR_surfdens': lambda: self.get_SFR_surfdens_xy(),
-            'H2_frac': lambda: self.get_H2_mass_frac_xy(),
-            'HI_frac': lambda: self.get_HI_mass_frac_xy(),
-            'gas_surfdens': lambda: self.get_surfdens_xy(PartType=0),
-            'star_surfdens': lambda: self.get_surfdens_xy(PartType=5),
-            'rotcurve': lambda: self.get_rotation_curve_xy(),
-            'kappa': lambda: self.get_kappa_xy(),
             'PtlMinIdcs': lambda: self.get_int_force_left_right_xy(PartType=6)[2],
-            'gas_voldens_midplane_total': self.get_midplane_density_xy(PartType=0),
-            'gas_voldens_midplane_coolwarm': self.get_midplane_density_xy(PartType=6),
-            'star_voldens_midplane': self.get_midplane_density_xy(PartType=5),
-            'veldisp_midplane': lambda: self.get_gas_midplane_veldisps_xyz_xy(),
-            'Pturb': lambda: self.get_gas_midplane_turbpress_xy(PartType=6),
-            'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(PartType=6),
             'weight': lambda: self.get_weight_xy(PartType=6) / ah.kB_cgs,
             'ForceLeft': lambda: self.get_int_force_left_right_xy(PartType=6)[0] / ah.kB_cgs, # alternative way to compute weight
             'ForceRight': lambda: self.get_int_force_left_right_xy(PartType=6)[1] / ah.kB_cgs,
             'Force': lambda: self.get_force_xy(PartType=6) / ah.kB_cgs,
-            # 'SFR_voldens_3D': lambda: self.get_SFR_voldens_xyz(), # for later
+            'SFR_surfdens': lambda: self.get_SFR_surfdens_xy(PartType=6),
+            'H2_frac': lambda: self.get_H2_mass_frac_xy(PartType=6),
+            'HI_frac': lambda: self.get_HI_mass_frac_xy(PartType=6),
+            'gas_surfdens': lambda: self.get_surfdens_xy(PartType=6),
+            'star_surfdens': lambda: self.get_surfdens_xy(PartType=5),
+            'rotcurve': lambda: self.get_rotation_curve_xy(),
+            'kappa': lambda: self.get_kappa_xy(),
+            'gas_voldens_midplane': lambda: self.get_midplane_density_xy(PartType=6),
+            'star_voldens_midplane': lambda: self.get_midplane_density_xy(PartType=5),
+            'veldisp_midplane': lambda: self.get_gas_midplane_veldisps_xyz_xy(PartType=6)[2],
+            'Pturb': lambda: self.get_gas_midplane_turbpress_xy(PartType=6),
+            'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(PartType=6),
+            'SFR_voldens_3D': lambda: self.get_SFR_voldens_xyz(PartType=6), # for later
             # 'H2_frac_3D': lambda: self.get_H2_mass_frac_xyz(),
             # 'HI_frac_3D': lambda: self.get_HI_mass_frac_xyz(),
             # 'Phi': lambda:self.get_potential_xyz(),
-            # 'gas_voldens': lambda: self.get_density_xyz(PartType=0),
+            'gas_SF_voldens': lambda: self.get_density_xyz(PartType=6, SFR_cnd=True),
             # 'star_voldens': lambda: self.get_density_xyz(PartType=5),
         }
 
@@ -428,103 +427,103 @@ class GriddedDataset:
 
     ###----------- HR-only reliable features, LR cubes -----------###
 
-    def get_SFR_surfdens_xy(self) -> np.array:
+    def get_SFR_surfdens_xy(self, PartType: int=0) -> np.array:
         '''Get the 2D surface density of the star formation rate in cgs'''
         SFR_surfdens, _, _, _ = binned_statistic_2d(
-            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["SFRs"],
+            self.data[PartType]["x_coords"], self.data[PartType]["y_coords"], self.data[PartType]["SFRs"],
             bins=(self.xbin_edges, self.ybin_edges),
             statistic='sum'
         )
         return SFR_surfdens / (self.xybin_width * self.xybin_width)
 
-    def get_SFR_voldens_xyz(self) -> np.array:
+    def get_SFR_voldens_xyz(self, PartType: int=0) -> np.array:
         '''Gas star formation rate volume density in cgs units'''
-        SFR_densities = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
-        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
-            cnd = (self.data[0]["z_coords"] > zbmin) & (self.data[0]["z_coords"] < zbmax)
-            if len(self.data[0]["x_coords"][cnd]) == 0:
+        SFR_densities = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
+        for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["x_coords"][cnd]) == 0:
                 SFR_densities[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
                 continue
             dens, _, _, _ = binned_statistic_2d(
-                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["SFRs"][cnd],
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["SFRs"][cnd],
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
-            SFR_densities[:,:,k] = dens / (self.xybin_width * self.xybin_width * self.zbin_width)
+            SFR_densities[:,:,k] = dens / (self.xybin_width * self.xybin_width * self.zbin_width_ptl)
         return SFR_densities
     
-    def get_H2_mass_frac_xy(self) -> np.array:
+    def get_H2_mass_frac_xy(self, PartType: int=0) -> np.array:
         '''Get the H2 mass fraction per 2D column, dimensionless'''
         H2_frac, _, _, _ = binned_statistic_2d(
-            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"]*self.data[0]["xH2"],
+            self.data[PartType]["x_coords"], self.data[PartType]["y_coords"], self.data[PartType]["masses"]*self.data[PartType]["xH2"],
             bins=(self.xbin_edges, self.ybin_edges),
             statistic='sum'
         )
         mass, _, _, _ = binned_statistic_2d(
-            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"],
+            self.data[PartType]["x_coords"], self.data[PartType]["y_coords"], self.data[PartType]["masses"],
             bins=(self.xbin_edges, self.ybin_edges),
             statistic='sum'
         )
         return H2_frac / mass
 
-    def get_H2_mass_frac_xyz(self) -> np.array:
+    def get_H2_mass_frac_xyz(self, PartType: int=0) -> np.array:
         '''Get the H2 mass fraction, dimensionless'''
         H2_frac = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
         for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
-            cnd = (self.data[0]["z_coords"] > zbmin) & (self.data[0]["z_coords"] < zbmax)
-            if len(self.data[0]["x_coords"][cnd]) == 0:
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["x_coords"][cnd]) == 0:
                 H2_frac[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
                 continue
             H2mass, _, _, _ = binned_statistic_2d(
-                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd]*self.data[0]["xH2"],
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType]["xH2"],
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
             mass, _, _, _ = binned_statistic_2d(
-                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd]*self.data[0]["xH2"],
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType]["xH2"],
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
             H2_frac[:,:,k] = H2mass / mass
         return H2_frac
     
-    def get_HI_mass_frac_xy(self) -> np.array:
+    def get_HI_mass_frac_xy(self, PartType: int=0) -> np.array:
         '''Get the HI mass fraction per 2D column, dimensionless'''
         HI_frac, _, _, _ = binned_statistic_2d(
-            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"]*self.data[0]["xHI"],
+            self.data[PartType]["x_coords"], self.data[PartType]["y_coords"], self.data[PartType]["masses"]*self.data[PartType]["xHI"],
             bins=(self.xbin_edges, self.ybin_edges),
             statistic='sum'
         )
         mass, _, _, _ = binned_statistic_2d(
-            self.data[0]["x_coords"], self.data[0]["y_coords"], self.data[0]["masses"],
+            self.data[PartType]["x_coords"], self.data[PartType]["y_coords"], self.data[PartType]["masses"],
             bins=(self.xbin_edges, self.ybin_edges),
             statistic='sum'
         )
         return HI_frac / mass
 
-    def get_HI_mass_frac_xyz(self) -> np.array:
+    def get_HI_mass_frac_xyz(self, PartType: int=0) -> np.array:
         '''Get the HI mass fraction, dimensionless'''
         HI_frac = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
         for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(self.zbinno)):
-            cnd = (self.data[0]["z_coords"] > zbmin) & (self.data[0]["z_coords"] < zbmax)
-            if len(self.data[0]["R_coords"][cnd]) == 0:
+            cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if len(self.data[PartType]["R_coords"][cnd]) == 0:
                 HI_frac[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
                 continue
             HImass, _, _, _ = binned_statistic_2d(
-                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd]*self.data[0]["xHI"],
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd]*self.data[PartType]["xHI"],
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
             mass, _, _, _ = binned_statistic_2d(
-                self.data[0]["x_coords"][cnd], self.data[0]["y_coords"][cnd], self.data[0]["masses"][cnd],
+                self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd],
                 bins=(self.xbin_edges, self.ybin_edges),
                 statistic='sum'
             )
             HI_frac[:,:,k] = HImass / mass
         return HI_frac
 
-    def get_density_xyz(self, zbinwidth: float=None, zbinedges: float=None, zbinno: float=None, PartType: int=None) -> np.array:
-        '''Get the 3D volume density in cgs'''
+    def get_density_xyz(self, zbinwidth: float=None, zbinedges: np.array=None, zbinno: int=None, PartType: int=None, SFR_cnd: bool=False) -> np.array:
+        '''Get the 3D volume density in cgs. If SFR_cnd==True, only uses star-forming gas.'''
 
         if PartType==None:
             logger.critical("Please specify a particle type for get_density_xyz.")
@@ -534,8 +533,10 @@ class GriddedDataset:
             zbinno = self.zbinno_ptl
 
         densities = np.zeros((self.xybinno, self.xybinno, zbinno)) * np.nan
-        for zbmin, zbmax, k in zip(self.zbin_edges[:-1], self.zbin_edges[1:], range(zbinno)):
+        for zbmin, zbmax, k in zip(zbinedges[:-1], zbinedges[1:], range(zbinno)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
+            if SFR_cnd:
+                cnd = cnd & (self.data[PartType]["SFRs"] > 0)
             if len(self.data[PartType]["R_coords"][cnd]) == 0:
                 densities[:,:,k] = np.zeros((self.xybinno, self.xybinno)) * np.nan
                 continue
@@ -552,7 +553,7 @@ class GriddedDataset:
         PartTypes: List[int] = [0,1,2,3,4],
         eps: float=1., # shape parameter, defaults to 1.
         kernel: str="cubic", # 3rd-order polyharmonic spline
-        neighbors: int=32 # number of neighbors to use for the interpolation
+        neighbors: int=64 # number of neighbors to use for the interpolation
     ):
         '''Get the potential array from the gas cells, in cgs units. This uses the RBF
         interpolation class from scipy.'''
@@ -567,7 +568,6 @@ class GriddedDataset:
             logger.critical("Requested particle types not loaded: {:s}".format(str([i for i in PartTypes if i not in self.data])))
             sys.exit(1)
 
-        print(len(x_all), len(y_all), len(z_all), len(ptl_all))
         interp = RBFInterpolator(
             coords_all,
             ptl_all,
@@ -583,9 +583,7 @@ class GriddedDataset:
         '''Get the integrand for the weight function, in cgs units.'''
 
         rho_grid = self.get_density_xyz(PartType=PartType)
-        print('computed density')
         ptl_grid = self.get_potential_xyz(PartTypes=PartTypes)
-        print('computed potential')
 
         dz = np.gradient(self.zbin_centers_3d_ptl, axis=2)
         dPhi = np.gradient(ptl_grid, axis=2)
@@ -747,16 +745,17 @@ class GriddedDataset:
         PartType: int=None,
     ) -> Tuple[np.array, np.array, np.array]:
         meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
-        veldisps_x = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
-        veldisps_y = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
-        veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno)) * np.nan
+        veldisps_x = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
+        veldisps_y = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
+        veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
         meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
         for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
             if len(self.data[PartType]["x_coords"][cnd]) == 0:
                 veldisps_z[:,:,k] = np.ones((self.xybinno, self.xybinno)) * np.nan
                 continue
-            veldisp_x, veldisp_y, veldisp_z = self._get_gas_veldisps_xyz_xy(meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
+            veldisp_x, veldisp_y, veldisp_z = self._get_gas_veldisps_xyz_xy(
+                meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
             veldisps_x[:,:,k] = veldisp_x
             veldisps_y[:,:,k] = veldisp_y
             veldisps_z[:,:,k] = veldisp_z

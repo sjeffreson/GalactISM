@@ -51,7 +51,7 @@ for snapname in snapnames:
         params=params,
         galaxy_type=galname,
         total_height=params.getfloat('TOT_HEIGHT'), # kpc
-        zbin_width_ptl=10., # so it's quicker for checking
+        zbin_width_ptl=10.,
         xymax=params.getfloat('XYMAX'), # kpc
         snapname=snapname,
         exclude_temp_above=EXCLUDE_TEMP,
