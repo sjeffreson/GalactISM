@@ -3,6 +3,8 @@ import h5py
 from GriddedData import GriddedDataset
 import astro_helper as ah
 
+import gc, resource
+
 import glob, os, re, sys
 from pathlib import Path
 import configparser
@@ -40,7 +42,7 @@ snapstr = params.get('SNAPSTR')
 
 snapnames = [
     snapstr + "_{0:03d}.hdf5".format(i) for i in 
-    range(params.getint('BEGSNAPNO'), params.getint('ENDSNAPNO')+1)
+    range(params.getint('BEGSNAPNO'), params.getint('ENDSNAPNO')+1, params.getint('SNAPSTEP'))
 ]
 midplane_idcs_arraynames = glob.glob(str(Path(params['ROOT_DIR']) / params['SUBDIR'] / "Forces_*_{:s}*.pkl".format(galname)))
 
@@ -57,7 +59,10 @@ for snapname in snapnames:
     with open(midplane_idcs_arrayname, "rb") as f:
         whole_dict = pickle.load(f)
     timelen_idcs = whole_dict['PtlMinIdcs'].shape[-1]
-    midplane_idcs = whole_dict['PtlMinIdcs'][:,:,int(snapno)-1-(int(midplane_idcs_no)-timelen_idcs)]
+    midplane_idcs = whole_dict['PtlMinIdcs'][:,:,int(float(snapno)/params.getfloat('SNAPSTEP'))-1-(int(float(midplane_idcs_no)/params.getfloat('SNAPSTEP'))-timelen_idcs)]
+    logger.info("Loaded midplane idcs from {:s} for snapno {:s} at idx {:d}".format(
+        midplane_idcs_arrayname, snapno,
+        int(float(snapno)/params.getfloat('SNAPSTEP'))-1-(int(float(midplane_idcs_no)/params.getfloat('SNAPSTEP'))-timelen_idcs)))
     del whole_dict
 
     '''Load the gal, feed it these mid-plane idcs'''
@@ -67,6 +72,7 @@ for snapname in snapnames:
         total_height=params.getfloat('TOT_HEIGHT'), # kpc
         zbin_width_ptl=10., # so it's quicker for checking
         xymax=params.getfloat('XYMAX'), # kpc
+        rotcurve_rsln=params.getfloat('ROTCURVERSLN'),
         xybin_width=params.getfloat('XYBINWIDTH'),
         snapname=snapname,
         midplane_idcs=midplane_idcs,
@@ -100,3 +106,5 @@ for snapname in snapnames:
             del props_3D[prop]
             props_3D[prop] = None
     del gal # memory
+    gc.collect()
+    logger.info("Memory usage: {:2.2f} GB".format(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**3))

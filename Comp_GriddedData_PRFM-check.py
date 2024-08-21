@@ -3,6 +3,8 @@ import h5py
 from GriddedData import GriddedDataset
 import astro_helper as ah
 
+import gc, resource
+
 import glob, os, re, sys
 from pathlib import Path
 import configparser
@@ -40,26 +42,10 @@ snapstr = params.get('SNAPSTR')
 
 snapnames = [
     snapstr + "_{0:03d}.hdf5".format(i) for i in 
-    range(params.getint('BEGSNAPNO'), params.getint('ENDSNAPNO')+1)
+    range(params.getint('BEGSNAPNO'), params.getint('ENDSNAPNO')+1, params.getint('SNAPSTEP'))
 ]
-midplane_idcs_arraynames = glob.glob(str(Path(params['ROOT_DIR']) / params['SUBDIR'] / "Forces_*_{:s}*.pkl".format(galname)))
-
 props_3D = {key: None for key in PROPS}
 for snapname in snapnames:
-    '''Open the pickle that stores the mid-plane idces, closest number larger than snapno stores values at time==snapno.'''
-    snapno = re.search(r'\d+', snapname).group()
-    midplane_idcs_arrayname = min(
-        midplane_idcs_arraynames,
-        key=lambda x: int(re.search(r'\d+', x.rsplit('/')[-1]).group()) - int(snapno) if
-        int(re.search(r'\d+', x.rsplit('/')[-1]).group()) > int(snapno)-1 else np.inf
-    )
-    midplane_idcs_no = re.search(r'\d+', midplane_idcs_arrayname.rsplit('/')[-1]).group()
-    with open(midplane_idcs_arrayname, "rb") as f:
-        whole_dict = pickle.load(f)
-    timelen_idcs = whole_dict['PtlMinIdcs'].shape[-1]
-    midplane_idcs = whole_dict['PtlMinIdcs'][:,:,int(snapno)-1-(int(midplane_idcs_no)-timelen_idcs)]
-    del whole_dict
-
     '''Load the gal, feed it these mid-plane idcs'''
     gal = GriddedDataset(
         params=params,
@@ -67,9 +53,9 @@ for snapname in snapnames:
         total_height=params.getfloat('TOT_HEIGHT'), # kpc
         zbin_width_ptl=10., # so it's quicker for checking
         xymax=params.getfloat('XYMAX'), # kpc
-        xybin_width=params.getfloat('XYBINWIDTH'), # pc
+        rotcurve_rsln=params.getfloat('ROTCURVERSLN'),
+        xybin_width=params.getfloat('XYBINWIDTH'),
         snapname=snapname,
-        #midplane_idcs=midplane_idcs,
         exclude_temp_above=EXCLUDE_TEMP,
         exclude_avir_below=EXCLUDE_AVIR,
         exclude_HII=EXCLUDE_HII,
@@ -78,7 +64,7 @@ for snapname in snapnames:
     )
 
     for prop in PROPS:
-        axisnum = 3
+        axisnum = 2
         if props_3D[prop] is None:
             props_3D[prop] = gal.get_prop_by_keyword(prop)
         elif props_3D[prop].ndim == axisnum:
@@ -89,7 +75,7 @@ for snapname in snapnames:
 
     '''Save the dictionary to a temporary pickle at regular intervals'''
     filesavedir = Path(params['SAVE_DIR']) / params['SUBDIR']
-    if (props_3D[PROPS[-1]].ndim > axisnum) & ((props_3D[PROPS[-1]].shape[-1] % 25 == 0) | (snapname == snapnames[-1])):
+    if (props_3D[PROPS[-1]].ndim > axisnum) & (snapname == snapnames[-1]):
         filesavename = str(filesavedir / PROPSSTRING) + "_{:s}_{:s}".format(
             re.search(r'\d+', snapname).group(), galname
         ) + savestring + ".pkl"
@@ -100,3 +86,5 @@ for snapname in snapnames:
             del props_3D[prop]
             props_3D[prop] = None
     del gal # memory
+    gc.collect()
+    logger.info("Memory usage: {:2.2f} GB".format(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**3))
