@@ -7,6 +7,7 @@ from scipy.signal import savgol_filter as sg
 from scipy.stats import binned_statistic_2d
 from scipy.interpolate import interp1d
 from scipy.interpolate import RBFInterpolator
+from scipy.spatial import KDTree
 
 import h5py
 import astro_helper as ah
@@ -144,12 +145,15 @@ class GriddedDataset:
             'HI_frac': lambda: self.get_HI_mass_frac_xy(),
             'gas_surfdens': lambda: self.get_surfdens_xy(),
             'star_surfdens': lambda: self.get_surfdens_xy(PartType=5),
+            'gas_voldens': lambda: self.get_voldens_xy(),
+            'dm_voldens': lambda: self.get_voldens_xy_KDTree(PartType=1),
+            'star_voldens': lambda: self.get_voldens_xy(PartType=5),
             'rotcurve': lambda: self.get_rotation_curve_xy(),
             'Omega': lambda: self.get_Omegaz_xy(),
             'kappa': lambda: self.get_kappa_xy(),
             'gas_voldens_midplane': lambda: self.get_midplane_density_xy(),
             'star_voldens_midplane': lambda: self.get_midplane_density_xy(PartType=5),
-            'veldisp_midplane': lambda: self.get_gas_midplane_veldisps_xyz_xy()[2],
+            'veldisp_midplane': lambda: self.get_midplane_veldisps_xyz_xy()[2],
             'Pturb': lambda: self.get_gas_midplane_turbpress_xy(),
             'Ptherm': lambda: self.get_gas_midplane_thermpress_xy(),
             #'SFR_voldens_3D': lambda: self.get_SFR_voldens_xyz(PartType=6), # for later
@@ -368,6 +372,40 @@ class GriddedDataset:
         )
         return surfdens / (self.xybin_width * self.xybin_width)
 
+    def get_voldens_xy(self, PartType: int=6) -> np.array:
+        '''Get the 3D volume density in cgs, on the scale of xybin_width (the 2D grid resolution)'''
+        cnd = np.fabs(self.data[PartType]["z_coords"]) < self.xybin_width/2.
+        voldens, _, _, _ = binned_statistic_2d(
+            self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["masses"][cnd],
+            bins=(self.xbin_edges, self.ybin_edges),
+            statistic='sum'
+        )
+        return voldens / self.xybin_width**3
+
+    def get_voldens_xy_KDTree(self, PartType: int=1, searchrad_kpc: float=0.5) -> np.array:
+        '''Get the 3D volume density in cgs, on the scale of xybin_width (the 2D grid resolution),
+        using a KDTree for the dark matter particles, which are potentially sparse'''
+        # save time by cutting out the particles that are more than searchrad_kpc away from the search
+        # grid
+        cnd = (
+            (np.fabs(self.data[PartType]["z_coords"]) < self.total_height + searchrad_kpc * ah.kpc_to_cm) &
+            (self.data[PartType]["R_coords"] < self.xymax + searchrad_kpc * ah.kpc_to_cm)
+        )
+        tree = KDTree(
+            np.vstack((self.data[PartType]["x_coords"][cnd], self.data[PartType]["y_coords"][cnd], self.data[PartType]["z_coords"][cnd])).T
+        )
+        if self.midplane_idcs is not None:
+            z_midplane = self.midplane_idcs * self.zbin_width_ptl + self.zbin_width_ptl/2. - self.total_height
+            grid_points = np.vstack([self.xbin_centers_2d.ravel(), self.ybin_centers_2d.ravel(), z_midplane.ravel()]).T
+        else:
+            logger.info("Mid-plane indices not set. Using z=0 plane.")
+            grid_points = np.vstack([self.xbin_centers_2d.ravel(), self.ybin_centers_2d.ravel(), np.zeros(self.xbin_centers_2d.size)]).T
+        idcs = tree.query_ball_point(grid_points, searchrad_kpc * ah.kpc_to_cm)
+        masses = np.array([np.sum(self.data[PartType]["masses"][idx]) for idx in idcs])
+        voldens = masses.reshape(self.xbin_centers_2d.shape) / (searchrad_kpc * ah.kpc_to_cm)**3
+
+        return voldens
+
     def _get_rotation_curve_R(self, PartType: int=6) -> np.array:
         '''Get the 1D rotation curve of the galaxy, within the gas disk, in cm/s.'''
 
@@ -553,10 +591,10 @@ class GriddedDataset:
     
     def get_potential_xyz(
         self,
-        PartTypes: List[int] = [0,1,2,3,4],
+        PartTypes: List[int] = [0,1,2,4],#[0,1,2,3,4],
         eps: float=1., # shape parameter, defaults to 1.
         kernel: str="cubic", # 3rd-order polyharmonic spline
-        neighbors: int=64 # number of neighbors to use for the interpolation
+        neighbors: int=32 # number of neighbors to use for the interpolation
     ):
         '''Get the potential array from the gas cells, in cgs units. This uses the RBF
         interpolation class from scipy.'''
@@ -636,16 +674,13 @@ class GriddedDataset:
         else: # estimate the mid-plane by returning the maximum value along the z-axis
             return np.nanmax(dens_3D, axis=2)
 
-    def _get_gas_av_vel_xyz_xy(
+    def _get_av_vel_xyz_xy(
         self,
         z_min: float=None,
         z_max: float=None,
-        PartType: int=6
+        PartType: int=6 # gas by default
     ) -> Tuple[np.array, np.array, np.array]:
         '''Get the average 2D gas velocity components in the x, y, and z directions, in cm/s.'''
-
-        if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in _get_gas_av_vel_xyz_xy (gas particles only).")
 
         if z_min==None:
             z_min = -self.total_height
@@ -674,7 +709,7 @@ class GriddedDataset:
 
         return tuple(meanvels)
 
-    def _get_gas_veldisps_xyz_xy(
+    def _get_veldisps_xyz_xy(
         self,
         meanvels_xyz: Tuple=None,
         z_min: float=None,
@@ -686,8 +721,6 @@ class GriddedDataset:
 
         if PartType==None:
             logger.critical("Please specify a particle type for get_gas_veldisps_xyz_xy.")
-        if PartType!=0 and PartType!=6:
-            logger.critical("Please set PartType0 or PartType 6 in get_gas_veldisps_xyz_xy (gas particles only).")
 
         if z_min==None:
             z_min = -self.total_height
@@ -707,7 +740,7 @@ class GriddedDataset:
         '''Subtract the mean velocity in each bin from the velocity components, then take the
         root-mean-square of the differences to get the velocity dispersions.'''
         if meanvels_xyz==None:
-            meanvels = self._get_gas_av_vel_xyz_xy(z_min=z_min, z_max=z_max, PartType=PartType)
+            meanvels = self._get_av_vel_xyz_xy(z_min=z_min, z_max=z_max, PartType=PartType)
         else:
             meanvels = meanvels_xyz
 
@@ -739,21 +772,21 @@ class GriddedDataset:
 
         return tuple(veldisps_xyz)
 
-    def get_gas_midplane_veldisps_xyz_xy(
+    def get_midplane_veldisps_xyz_xy(
         self,
         PartType: int=6,
     ) -> Tuple[np.array, np.array, np.array]:
-        meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        meanvels = self._get_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
         veldisps_x = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
         veldisps_y = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
         veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
-        meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        meanvels = self._get_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
         for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
             if len(self.data[PartType]["x_coords"][cnd]) == 0:
                 veldisps_z[:,:,k] = np.ones((self.xybinno, self.xybinno)) * np.nan
                 continue
-            veldisp_x, veldisp_y, veldisp_z = self._get_gas_veldisps_xyz_xy(
+            veldisp_x, veldisp_y, veldisp_z = self._get_veldisps_xyz_xy(
                 meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
             veldisps_x[:,:,k] = veldisp_x
             veldisps_y[:,:,k] = veldisp_y
@@ -772,13 +805,13 @@ class GriddedDataset:
         density = self.get_density_xyz(PartType=PartType)
 
         veldisps_z = np.zeros((self.xybinno, self.xybinno, self.zbinno_ptl)) * np.nan
-        meanvels = self._get_gas_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
+        meanvels = self._get_av_vel_xyz_xy(z_min=-self.total_height, z_max=self.total_height, PartType=PartType)
         for zbmin, zbmax, k in zip(self.zbin_edges_ptl[:-1], self.zbin_edges_ptl[1:], range(self.zbinno_ptl)):
             cnd = (self.data[PartType]["z_coords"] > zbmin) & (self.data[PartType]["z_coords"] < zbmax)
             if len(self.data[PartType]["x_coords"][cnd]) == 0:
                 veldisps_z[:,:,k] = np.ones((self.xybinno, self.xybinno)) * np.nan
                 continue
-            _, _, veldisp_z = self._get_gas_veldisps_xyz_xy(meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
+            _, _, veldisp_z = self._get_veldisps_xyz_xy(meanvels_xyz=meanvels, z_min=zbmin, z_max=zbmax, PartType=PartType)
             veldisps_z[:,:,k] = veldisp_z
         
         turbpress_3D = veldisps_z**2 * density / ah.kB_cgs

@@ -42,7 +42,6 @@ snapnames = [
     snapstr + "_{0:03d}.hdf5".format(i) for i in 
     range(params.getint('BEGSNAPNO'), params.getint('ENDSNAPNO')+1, params.getint('SNAPSTEP'))
 ]
-print(snapnames)
 
 props_3D = {key: None for key in PROPS}
 for snapname in snapnames:
