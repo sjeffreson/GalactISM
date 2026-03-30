@@ -111,7 +111,7 @@ Expects Arepo simulation snapshots in HDF5 format (`snap-DESPOTIC_*.hdf5`) with:
 ## Contributors
 
 - **Sarah Jeffreson**
-- **Claude** (Anthropic)**
+- **Claude** (Anthropic)
 
 ## License
 
