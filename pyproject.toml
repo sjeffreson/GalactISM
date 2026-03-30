@@ -1,0 +1,13 @@
+[project]
+name = "galactism"
+version = "0.1.0"
+description = "SFR extraction pipeline for training normalizing flows on galaxy simulations"
+requires-python = ">=3.13"
+dependencies = [
+    "h5py>=3.16.0",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "pyyaml>=6.0.3",
+    "scipy>=1.17.1",
+]

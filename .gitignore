@@ -173,3 +173,6 @@ CLAUDE.md
 # Data files and output
 *.hdf5
 output/
+
+# uv
+.venv/

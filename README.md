@@ -28,23 +28,18 @@ To pair cells with their context: `context[pixel_id]` broadcasts the 2D features
 
 ## Installation
 
-Requires Python 3.10+ and the following packages:
+Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/):
 
+```bash
+uv sync
 ```
-numpy
-scipy
-h5py
-pyyaml
-```
-
-No package install is needed -- run directly from the repo root.
 
 ## Usage
 
 ### Extract training data from snapshots
 
 ```bash
-python -m sfemulator.data.extract --config configs/test.yaml
+uv run python -m sfemulator.data.extract --config configs/test.yaml
 ```
 
 ### Configuration
