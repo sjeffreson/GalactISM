@@ -1,0 +1,21 @@
+# Configuration for ETG very-low-mass galaxy
+root_dir: /path/to/data
+save_dir: /path/to/output
+subdir: ETGs/vlM-output
+snap_prefix: snap-DESPOTIC
+
+beg_snap: 100
+end_snap: 400
+snap_step: 1
+
+# Grid parameters
+xymax_kpc: 2.0
+xybin_width_pc: 80.0
+total_height_kpc: 0.3
+rotcurve_rsln_pc: 20.0
+
+# DM density
+dm_search_radius_kpc: 0.5
+
+# Midplane finding (z-bin width for potential-minimum search)
+midplane_zbin_width_pc: 10.0
