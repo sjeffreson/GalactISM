@@ -1,0 +1,13 @@
+root_dir: /n/holystore01/LABS/itc_lab/Users/sjeffreson
+save_dir: /n/holystore01/LABS/itc_lab/Users/sjeffreson/GalactISM_output/NGC300
+subdir: NGC300
+snap_prefix: snap-DESPOTIC
+
+beg_snap: 500
+end_snap: 800
+snap_step: 10
+
+xymax_kpc: 6.0
+xybin_width_pc: 80.0
+total_height_kpc: 1.5
+rotcurve_rsln_pc: 60.0
