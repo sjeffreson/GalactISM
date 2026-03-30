@@ -113,6 +113,11 @@ Expects Arepo simulation snapshots in HDF5 format (`snap-DESPOTIC_*.hdf5`) with:
 - `PartType2` (disk stars): Coordinates, Velocities (masses from MassTable)
 - `PartType4` (new stars): Coordinates, Velocities, Masses
 
+## Contributors
+
+- **Sarah Jeffreson** -- project lead, original simulation analysis code
+- **Claude** (Anthropic) -- refactored extraction pipeline, README, and notebook
+
 ## License
 
 See [LICENSE](LICENSE).
