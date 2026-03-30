@@ -110,8 +110,8 @@ Expects Arepo simulation snapshots in HDF5 format (`snap-DESPOTIC_*.hdf5`) with:
 
 ## Contributors
 
-- **Sarah Jeffreson** -- project lead, original simulation analysis code
-- **Claude** (Anthropic) -- refactored extraction pipeline, README, and notebook
+- **Sarah Jeffreson**
+- **Claude** (Anthropic)**
 
 ## License
 
