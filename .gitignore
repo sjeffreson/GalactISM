@@ -1,3 +1,6 @@
+# for this project
+snapshots/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
