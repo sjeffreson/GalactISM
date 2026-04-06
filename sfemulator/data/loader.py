@@ -21,6 +21,7 @@ SFR_SURFDENS_TO_MSUN_YR_KPC2 = YR_TO_S * KPC_TO_CM**2 / MSOL_TO_G
 CONTEXT_NAMES = ["gas_surfdens", "star_surfdens", "rotcurve", "kappa", "dm_voldens"]
 
 GALAXIES = {
+    "MW":       {"dir": "MW",       "pixel_pc": 80.0},
     "NGC300":   {"dir": "NGC300",   "pixel_pc": 80.0},
     "ETG-vlM":  {"dir": "ETG-vlM",  "pixel_pc": 80.0},
     "ETG-lowM": {"dir": "ETG-lowM", "pixel_pc": 80.0},
@@ -65,8 +66,13 @@ def load_all_galaxies(snap_dir: Path) -> Dict[str, Tuple[np.ndarray, np.ndarray]
 def prepare_log_data(
     data: Dict[str, Tuple[np.ndarray, np.ndarray]],
     galaxy_names: list[str] | None = None,
+    feature_indices: list[int] | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Combine galaxies into log-space arrays, filtering non-finite rows.
+
+    Args:
+        feature_indices: which context columns to keep (default: all 5).
+            e.g. [0] for gas_surfdens only, [0, 1, 2] for the first three.
 
     Returns (X_log, y_log, finite_mask_on_original).
     """
@@ -74,6 +80,9 @@ def prepare_log_data(
         galaxy_names = list(data.keys())
     all_ctx = np.concatenate([data[n][0] for n in galaxy_names])
     all_sfr = np.concatenate([data[n][1] for n in galaxy_names])
+
+    if feature_indices is not None:
+        all_ctx = all_ctx[:, feature_indices]
 
     log_ctx = np.log10(all_ctx)
     log_sfr = np.log10(all_sfr)
