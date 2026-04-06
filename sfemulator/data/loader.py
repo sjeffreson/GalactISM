@@ -67,12 +67,16 @@ def prepare_log_data(
     data: Dict[str, Tuple[np.ndarray, np.ndarray]],
     galaxy_names: list[str] | None = None,
     feature_indices: list[int] | None = None,
+    log_sfr_floor: float = -25.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Combine galaxies into log-space arrays, filtering non-finite rows.
 
     Args:
         feature_indices: which context columns to keep (default: all 5).
             e.g. [0] for gas_surfdens only, [0, 1, 2] for the first three.
+        log_sfr_floor: minimum log10(SFR surface density) in CGS to keep.
+            Pixels below this are artifacts of stochastic SFR, not real
+            star formation. Default -25 is very conservative.
 
     Returns (X_log, y_log, finite_mask_on_original).
     """
@@ -86,6 +90,10 @@ def prepare_log_data(
 
     log_ctx = np.log10(all_ctx)
     log_sfr = np.log10(all_sfr)
-    finite = np.all(np.isfinite(log_ctx), axis=1) & np.isfinite(log_sfr)
+    finite = (
+        np.all(np.isfinite(log_ctx), axis=1)
+        & np.isfinite(log_sfr)
+        & (log_sfr >= log_sfr_floor)
+    )
 
     return log_ctx[finite], log_sfr[finite], finite
