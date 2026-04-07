@@ -89,17 +89,22 @@ def run_sweep(snap_dir: Path, out_path: Path, n_epochs: int, device: str) -> Non
                 y_test_t = torch.tensor(y_test_true.astype(np.float32)).to(device)
 
                 y_pred = predict_mean(model, X_test_t)
-                r2 = r2_score(y_test_true, y_pred)
                 nll = predict_nll(model, X_test_t, y_test_t)
+
+                if np.any(np.isnan(y_pred)) or np.isnan(nll):
+                    r2 = float("nan")
+                    nll = float("nan")
+                    print(f"  {held_out:<12} NLL=     NaN  R²=     NaN  (diverged)")
+                else:
+                    r2 = r2_score(y_test_true, y_pred)
+                    print(f"  {held_out:<12} NLL={nll:8.4f}  R²={r2:8.4f}  ({time.time() - t0:.1f}s)")
 
                 fold_nlls.append(nll)
                 fold_r2s.append(r2)
                 fold_curves[held_out] = losses
-                elapsed = time.time() - t0
-                print(f"  {held_out:<12} NLL={nll:8.4f}  R²={r2:8.4f}  ({elapsed:.1f}s)")
 
-            mean_nll = np.mean(fold_nlls)
-            mean_r2 = np.mean(fold_r2s)
+            mean_nll = np.nanmean(fold_nlls)
+            mean_r2 = np.nanmean(fold_r2s)
             print(f"  {'MEAN':<12} NLL={mean_nll:8.4f}  R²={mean_r2:8.4f}")
 
             row = {
